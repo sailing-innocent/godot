@@ -4,6 +4,7 @@
 #include "hex_grid_map_data.h"
 #include "hex_terrain_library.h"
 #include "scene/3d/node_3d.h"
+#include "core/math/aabb.h"
 #include "core/math/vector2i.h"
 #include "core/templates/rid.h"
 #include "core/templates/hash_map.h"
@@ -42,6 +43,8 @@ private:
 			RID instance;
 			RID multimesh;
 			StringName terrain_id;
+			int variant = 0;
+			bool fill = false;
 		};
 		Vector<MultimeshInstance> multimesh_instances;
 	};
@@ -142,7 +145,16 @@ public:
 	Vector3 map_to_local(const Vector2i &p_coord, int p_height = 0) const;
 	Vector2i local_to_map(const Vector3 &p_local) const;
 	Vector2i get_neighbor(const Vector2i &p_coord, int p_direction) const;
+	TypedArray<Vector2i> get_all_neighbors(const Vector2i &p_coord) const;
+	TypedArray<Vector2i> get_cells_in_ring(const Vector2i &p_center, int p_radius) const;
+	TypedArray<Vector2i> get_cells_in_disk(const Vector2i &p_center, int p_radius) const;
 	TypedArray<Vector2i> get_cells_in_range(const Vector2i &p_center, int p_radius) const;
+
+	bool has_terrain(const Vector2i &p_coord) const;
+	AABB get_cell_world_bounds(const Vector2i &p_coord) const;
+
+	void set_cells_bulk(const TypedArray<HexCellData> &p_cells);
+	void erase_cells_bulk(const TypedArray<Vector2i> &p_coords);
 
 	void refresh_cell(const Vector2i &p_coord);
 	void refresh();

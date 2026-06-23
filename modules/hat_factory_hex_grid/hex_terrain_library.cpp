@@ -13,10 +13,13 @@ void HexTerrainLibrary::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_terrain_ids"), &HexTerrainLibrary::get_terrain_ids);
 
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "terrains"), "set_terrains", "get_terrains");
+
+	ADD_SIGNAL(MethodInfo("terrains_changed"));
 }
 
 void HexTerrainLibrary::set_terrains(const Dictionary &p_terrains) {
 	terrains = p_terrains;
+	emit_signal(SNAME("terrains_changed"));
 	emit_changed();
 }
 
@@ -26,11 +29,13 @@ Dictionary HexTerrainLibrary::get_terrains() const {
 
 void HexTerrainLibrary::add_terrain(const StringName &p_id, const Ref<HexTerrainDef> &p_def) {
 	terrains[p_id] = p_def;
+	emit_signal(SNAME("terrains_changed"));
 	emit_changed();
 }
 
 void HexTerrainLibrary::remove_terrain(const StringName &p_id) {
 	terrains.erase(p_id);
+	emit_signal(SNAME("terrains_changed"));
 	emit_changed();
 }
 

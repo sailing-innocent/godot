@@ -2,6 +2,7 @@
 
 #include "core/core_string_names.h"
 #include "core/math/math_funcs.h"
+#include "core/string/ustring.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
@@ -91,7 +92,16 @@ void HexGridMap::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("map_to_local", "coord", "height"), &HexGridMap::map_to_local, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("local_to_map", "local_position"), &HexGridMap::local_to_map);
 	ClassDB::bind_method(D_METHOD("get_neighbor", "coord", "direction"), &HexGridMap::get_neighbor);
+	ClassDB::bind_method(D_METHOD("get_all_neighbors", "coord"), &HexGridMap::get_all_neighbors);
+	ClassDB::bind_method(D_METHOD("get_cells_in_ring", "center", "radius"), &HexGridMap::get_cells_in_ring);
+	ClassDB::bind_method(D_METHOD("get_cells_in_disk", "center", "radius"), &HexGridMap::get_cells_in_disk);
 	ClassDB::bind_method(D_METHOD("get_cells_in_range", "center", "radius"), &HexGridMap::get_cells_in_range);
+
+	ClassDB::bind_method(D_METHOD("has_terrain", "coord"), &HexGridMap::has_terrain);
+	ClassDB::bind_method(D_METHOD("get_cell_world_bounds", "coord"), &HexGridMap::get_cell_world_bounds);
+
+	ClassDB::bind_method(D_METHOD("set_cells_bulk", "cells"), &HexGridMap::set_cells_bulk);
+	ClassDB::bind_method(D_METHOD("erase_cells_bulk", "coords"), &HexGridMap::erase_cells_bulk);
 
 	ClassDB::bind_method(D_METHOD("refresh_cell", "coord"), &HexGridMap::refresh_cell);
 	ClassDB::bind_method(D_METHOD("refresh"), &HexGridMap::refresh);
@@ -353,16 +363,44 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 		}
 
 		Ref<HexTerrainDef> def = terrain_library->get_terrain(terrain_id);
-		if (def.is_null() || def->get_mesh().is_null()) {
+		if (def.is_null()) {
 			continue;
 		}
 
-		Transform3D xform(Basis(), map_to_local(cell_coord, cell->get_height()));
+		const int height = cell->get_height();
+		const int variant = cell->get_variant();
 
-		if (!groups.has(terrain_id)) {
-			groups[terrain_id] = LocalVector<Transform3D>();
+		// Optional stacked-height fill layers.
+		if (height > 0 && def->get_fill_mesh().is_valid()) {
+			const int fill_step = MAX(def->get_fill_step(), 1);
+			const StringName fill_key = StringName(String("__fill__") + terrain_id);
+			for (int l = 0; l < height; l += fill_step) {
+				Transform3D fxform(Basis(), map_to_local(cell_coord, l));
+				if (!groups.has(fill_key)) {
+					groups[fill_key] = LocalVector<Transform3D>();
+				}
+				groups[fill_key].push_back(fxform);
+			}
 		}
-		groups[terrain_id].push_back(xform);
+
+		// Top cap mesh with variant resolution.
+		Ref<Mesh> top_mesh = def->get_mesh();
+		if (variant >= 0 && variant < (int)def->get_variant_meshes().size()) {
+			Ref<Mesh> vm = def->get_variant_meshes()[variant];
+			if (vm.is_valid()) {
+				top_mesh = vm;
+			}
+		}
+		if (top_mesh.is_null()) {
+			continue;
+		}
+
+		const StringName top_key = StringName(String(terrain_id) + ":" + String::num_int64(variant));
+		Transform3D xform(Basis(), map_to_local(cell_coord, height));
+		if (!groups.has(top_key)) {
+			groups[top_key] = LocalVector<Transform3D>();
+		}
+		groups[top_key].push_back(xform);
 
 #ifndef PHYSICS_3D_DISABLED
 		if (def->get_physics_shape().is_valid()) {
@@ -377,8 +415,52 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 	}
 
 	for (KeyValue<StringName, LocalVector<Transform3D>> &E : groups) {
-		Ref<HexTerrainDef> def = terrain_library->get_terrain(E.key);
-		if (def.is_null() || def->get_mesh().is_null()) {
+		const String key_str = E.key;
+		const bool is_fill = key_str.begins_with("__fill__");
+
+		StringName terrain_id = E.key;
+		int variant = 0;
+		Ref<Mesh> mesh;
+		Ref<Material> material;
+		bool cast_shadows = true;
+
+		if (is_fill) {
+			terrain_id = StringName(key_str.substr(8));
+			Ref<HexTerrainDef> def = terrain_library->get_terrain(terrain_id);
+			if (def.is_null()) {
+				continue;
+			}
+			mesh = def->get_fill_mesh();
+			material = def->get_fill_material();
+			cast_shadows = def->get_cast_shadows();
+		} else {
+			int sep = key_str.find(":");
+			if (sep >= 0) {
+				terrain_id = StringName(key_str.substr(0, sep));
+				variant = key_str.substr(sep + 1).to_int();
+			}
+			Ref<HexTerrainDef> def = terrain_library->get_terrain(terrain_id);
+			if (def.is_null()) {
+				continue;
+			}
+			mesh = def->get_mesh();
+			material = def->get_material();
+			if (variant >= 0 && variant < (int)def->get_variant_meshes().size()) {
+				Ref<Mesh> vm = def->get_variant_meshes()[variant];
+				if (vm.is_valid()) {
+					mesh = vm;
+				}
+			}
+			if (variant >= 0 && variant < (int)def->get_variant_materials().size()) {
+				Ref<Material> vmat = def->get_variant_materials()[variant];
+				if (vmat.is_valid()) {
+					material = vmat;
+				}
+			}
+			cast_shadows = def->get_cast_shadows();
+		}
+
+		if (mesh.is_null()) {
 			continue;
 		}
 
@@ -389,7 +471,7 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 
 		RID mm = RS::get_singleton()->multimesh_create();
 		RS::get_singleton()->multimesh_allocate_data(mm, instance_count, RSE::MULTIMESH_TRANSFORM_3D);
-		RS::get_singleton()->multimesh_set_mesh(mm, def->get_mesh()->get_rid());
+		RS::get_singleton()->multimesh_set_mesh(mm, mesh->get_rid());
 
 		for (int i = 0; i < instance_count; i++) {
 			RS::get_singleton()->multimesh_instance_set_transform(mm, i, E.value[i]);
@@ -403,17 +485,19 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 			RS::get_singleton()->instance_set_transform(inst, get_global_transform());
 		}
 
-		if (def->get_material().is_valid()) {
-			RS::get_singleton()->instance_geometry_set_material_override(inst, def->get_material()->get_rid());
+		if (material.is_valid()) {
+			RS::get_singleton()->instance_geometry_set_material_override(inst, material->get_rid());
 		}
 
-		RSE::ShadowCastingSetting shadow = def->get_cast_shadows() ? RSE::SHADOW_CASTING_SETTING_ON : RSE::SHADOW_CASTING_SETTING_OFF;
+		RSE::ShadowCastingSetting shadow = cast_shadows ? RSE::SHADOW_CASTING_SETTING_ON : RSE::SHADOW_CASTING_SETTING_OFF;
 		RS::get_singleton()->instance_geometry_set_cast_shadows_setting(inst, shadow);
 
 		Chunk::MultimeshInstance mmi;
 		mmi.instance = inst;
 		mmi.multimesh = mm;
-		mmi.terrain_id = E.key;
+		mmi.terrain_id = terrain_id;
+		mmi.variant = variant;
+		mmi.fill = is_fill;
 		chunk->multimesh_instances.push_back(mmi);
 	}
 
@@ -774,6 +858,121 @@ TypedArray<Vector2i> HexGridMap::get_cells_in_range(const Vector2i &p_center, in
 		}
 	}
 	return result;
+}
+
+TypedArray<Vector2i> HexGridMap::get_all_neighbors(const Vector2i &p_coord) const {
+	TypedArray<Vector2i> result;
+	for (int i = 0; i < 6; i++) {
+		result.push_back(get_neighbor(p_coord, i));
+	}
+	return result;
+}
+
+TypedArray<Vector2i> HexGridMap::get_cells_in_ring(const Vector2i &p_center, int p_radius) const {
+	TypedArray<Vector2i> result;
+	if (p_radius <= 0) {
+		result.push_back(p_center);
+		return result;
+	}
+
+	Vector2i coord = p_center + get_neighbor(Vector2i(), 4) * p_radius;
+	for (int i = 0; i < 6; i++) {
+		for (int j = 0; j < p_radius; j++) {
+			result.push_back(coord);
+			coord = get_neighbor(coord, i);
+		}
+	}
+	return result;
+}
+
+TypedArray<Vector2i> HexGridMap::get_cells_in_disk(const Vector2i &p_center, int p_radius) const {
+	return get_cells_in_range(p_center, p_radius);
+}
+
+bool HexGridMap::has_terrain(const Vector2i &p_coord) const {
+	if (!cell_map.has(p_coord)) {
+		return false;
+	}
+	if (terrain_library.is_null()) {
+		return false;
+	}
+	Ref<HexCellData> cell = cell_map[p_coord];
+	return terrain_library->has_terrain(cell->get_terrain_id());
+}
+
+AABB HexGridMap::get_cell_world_bounds(const Vector2i &p_coord) const {
+	Ref<HexCellData> cell = get_cell(p_coord);
+	int height = cell.is_valid() ? cell->get_height() : 0;
+
+	Vector3 center = map_to_local(p_coord, height);
+	float half_w;
+	float half_d;
+	if (orientation == ORIENTATION_POINTY_TOP) {
+		half_w = hex_size * Math::sqrt(3.0f) * 0.5f;
+		half_d = hex_size;
+	} else {
+		half_w = hex_size;
+		half_d = hex_size * Math::sqrt(3.0f) * 0.5f;
+	}
+	float half_h = cell_height_step * 0.5f;
+	if (half_h < 0.05f) {
+		half_h = 0.05f;
+	}
+
+	Vector3 global_center = get_global_transform().xform(center);
+	Vector3 size(half_w * 2.0f, half_h * 2.0f, half_d * 2.0f);
+	return AABB(global_center - size * 0.5f, size);
+}
+
+void HexGridMap::set_cells_bulk(const TypedArray<HexCellData> &p_cells) {
+	HashSet<Vector2i> dirty_chunk_keys;
+	for (int i = 0; i < p_cells.size(); i++) {
+		Ref<HexCellData> cell = p_cells[i];
+		if (cell.is_null()) {
+			continue;
+		}
+		Vector2i coord = cell->get_coord();
+		if (cell_map.has(coord)) {
+			_remove_cell_from_chunk(coord);
+		}
+		cell_map[coord] = cell;
+		_add_cell_to_chunk(coord);
+		dirty_chunk_keys.insert(_cell_to_chunk(coord));
+	}
+
+	for (const Vector2i &ck : dirty_chunk_keys) {
+		_queue_chunk_dirty(ck);
+	}
+
+	for (int i = 0; i < p_cells.size(); i++) {
+		Ref<HexCellData> cell = p_cells[i];
+		if (cell.is_null()) {
+			continue;
+		}
+		emit_signal(SNAME("cell_changed"), cell->get_coord());
+	}
+}
+
+void HexGridMap::erase_cells_bulk(const TypedArray<Vector2i> &p_coords) {
+	HashSet<Vector2i> dirty_chunk_keys;
+	for (int i = 0; i < p_coords.size(); i++) {
+		Vector2i coord = p_coords[i];
+		if (!cell_map.has(coord)) {
+			continue;
+		}
+		_remove_cell_from_chunk(coord);
+		cell_map.erase(coord);
+		dirty_chunk_keys.insert(_cell_to_chunk(coord));
+	}
+
+	for (const Vector2i &ck : dirty_chunk_keys) {
+		_queue_chunk_dirty(ck);
+	}
+
+	for (int i = 0; i < p_coords.size(); i++) {
+		Vector2i coord = p_coords[i];
+		emit_signal(SNAME("cell_changed"), coord);
+	}
 }
 
 void HexGridMap::refresh_cell(const Vector2i &p_coord) {
