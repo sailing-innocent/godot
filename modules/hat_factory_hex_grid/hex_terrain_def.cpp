@@ -1,5 +1,6 @@
 #include "hex_terrain_def.h"
 
+#include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
 
 void HexTerrainDef::_bind_methods() {
@@ -21,12 +22,36 @@ void HexTerrainDef::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "cast_shadows"), &HexTerrainDef::set_cast_shadows);
 	ClassDB::bind_method(D_METHOD("get_cast_shadows"), &HexTerrainDef::get_cast_shadows);
 
+	ClassDB::bind_method(D_METHOD("set_variant_meshes", "variant_meshes"), &HexTerrainDef::set_variant_meshes);
+	ClassDB::bind_method(D_METHOD("get_variant_meshes"), &HexTerrainDef::get_variant_meshes);
+
+	ClassDB::bind_method(D_METHOD("set_variant_materials", "variant_materials"), &HexTerrainDef::set_variant_materials);
+	ClassDB::bind_method(D_METHOD("get_variant_materials"), &HexTerrainDef::get_variant_materials);
+
+	ClassDB::bind_method(D_METHOD("set_fill_mesh", "fill_mesh"), &HexTerrainDef::set_fill_mesh);
+	ClassDB::bind_method(D_METHOD("get_fill_mesh"), &HexTerrainDef::get_fill_mesh);
+
+	ClassDB::bind_method(D_METHOD("set_fill_material", "fill_material"), &HexTerrainDef::set_fill_material);
+	ClassDB::bind_method(D_METHOD("get_fill_material"), &HexTerrainDef::get_fill_material);
+
+	ClassDB::bind_method(D_METHOD("set_fill_step", "fill_step"), &HexTerrainDef::set_fill_step);
+	ClassDB::bind_method(D_METHOD("get_fill_step"), &HexTerrainDef::get_fill_step);
+
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "terrain_id"), "set_terrain_id", "get_terrain_id");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "mesh", PROPERTY_HINT_RESOURCE_TYPE, "Mesh"), "set_mesh", "get_mesh");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "material", PROPERTY_HINT_RESOURCE_TYPE, "Material"), "set_material", "get_material");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "physics_shape", PROPERTY_HINT_RESOURCE_TYPE, "Shape3D"), "set_physics_shape", "get_physics_shape");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "flags"), "set_flags", "get_flags");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cast_shadows"), "set_cast_shadows", "get_cast_shadows");
+
+	ADD_GROUP("Variants", "variant_");
+	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "variant_meshes", PROPERTY_HINT_ARRAY_TYPE, "Mesh"), "set_variant_meshes", "get_variant_meshes");
+	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "variant_materials", PROPERTY_HINT_ARRAY_TYPE, "Material"), "set_variant_materials", "get_variant_materials");
+
+	ADD_GROUP("Fill", "fill_");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fill_mesh", PROPERTY_HINT_RESOURCE_TYPE, "Mesh"), "set_fill_mesh", "get_fill_mesh");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fill_material", PROPERTY_HINT_RESOURCE_TYPE, "Material"), "set_fill_material", "get_fill_material");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "fill_step"), "set_fill_step", "get_fill_step");
 }
 
 void HexTerrainDef::set_terrain_id(const StringName &p_id) {
@@ -75,4 +100,44 @@ void HexTerrainDef::set_cast_shadows(bool p_enabled) {
 
 bool HexTerrainDef::get_cast_shadows() const {
 	return cast_shadows;
+}
+
+void HexTerrainDef::set_variant_meshes(const TypedArray<Mesh> &p_meshes) {
+	variant_meshes = p_meshes;
+}
+
+TypedArray<Mesh> HexTerrainDef::get_variant_meshes() const {
+	return variant_meshes;
+}
+
+void HexTerrainDef::set_variant_materials(const TypedArray<Material> &p_materials) {
+	variant_materials = p_materials;
+}
+
+TypedArray<Material> HexTerrainDef::get_variant_materials() const {
+	return variant_materials;
+}
+
+void HexTerrainDef::set_fill_mesh(const Ref<Mesh> &p_mesh) {
+	fill_mesh = p_mesh;
+}
+
+Ref<Mesh> HexTerrainDef::get_fill_mesh() const {
+	return fill_mesh;
+}
+
+void HexTerrainDef::set_fill_material(const Ref<Material> &p_material) {
+	fill_material = p_material;
+}
+
+Ref<Material> HexTerrainDef::get_fill_material() const {
+	return fill_material;
+}
+
+void HexTerrainDef::set_fill_step(int p_step) {
+	fill_step = MAX(p_step, 1);
+}
+
+int HexTerrainDef::get_fill_step() const {
+	return fill_step;
 }

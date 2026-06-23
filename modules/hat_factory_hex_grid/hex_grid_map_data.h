@@ -33,8 +33,12 @@ public:
 	StringName get_default_terrain() const;
 
 	void set_cell(const Vector2i &p_coord, const Ref<HexCellData> &p_cell);
+	void set_cells_bulk(const TypedArray<HexCellData> &p_cells);
 	void erase_cell(const Vector2i &p_coord);
+	void erase_cells_bulk(const TypedArray<Vector2i> &p_coords);
 	Ref<HexCellData> get_cell(const Vector2i &p_coord) const;
+	Ref<HexCellData> get_cell_or_default(const Vector2i &p_coord) const;
+	Ref<HexCellData> duplicate_cell(const Vector2i &p_coord) const;
 	bool has_cell(const Vector2i &p_coord) const;
 	TypedArray<Vector2i> get_used_cells() const;
 	void clear();

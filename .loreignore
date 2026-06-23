@@ -399,3 +399,4 @@ $RECYCLE.BIN/
 
 uv.lock
 *.pdb
+msvc_capture.log
