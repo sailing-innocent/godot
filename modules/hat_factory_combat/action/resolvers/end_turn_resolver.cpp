@@ -9,6 +9,10 @@
 #include "event/game_event.h"
 #include "state/battle_state.h"
 #include "state/combat_entity.h"
+#include "state/rule_set.h"
+#include "components/transform_component.h"
+#include "modules/hat_factory_hex_grid/hex_cell_data.h"
+#include "modules/hat_factory_hex_grid/hex_grid_map_data.h"
 
 #include "core/object/class_db.h"
 
@@ -121,10 +125,27 @@ Ref<ActionResult> EndTurnResolver::resolve(const Ref<BattleState> &p_state, cons
 				next_turn->set_acted(false);
 				next_turn->set_skipped(false);
 			}
-			// Action points refresh at the start of the actor's turn.
+			// Use the same terrain energy rule as BattleEngine::start_turn().
 			Ref<StatsComponent> next_stats = next_entity->get_component(StringName("Stats"));
 			if (next_stats.is_valid()) {
-				next_stats->set_ap(next_stats->get_max_ap());
+				Ref<RuleSet> rules = next->get_rules();
+				if (rules.is_valid() && rules->get_use_terrain_energy_regen()) {
+					StringName terrain_id;
+					int height = 0;
+					Ref<TransformComponent> transform = next_entity->get_component(StringName("Transform"));
+					Ref<HexGridMapData> grid = next->get_grid_data();
+					if (transform.is_valid() && grid.is_valid()) {
+						Ref<HexCellData> cell = grid->get_cell(transform->get_coord());
+						if (cell.is_valid()) {
+							terrain_id = cell->get_terrain_id();
+							height = cell->get_height();
+						}
+					}
+					int regen = rules->get_energy_regen_for(terrain_id, height);
+					next_stats->set_ap(CLAMP(next_stats->get_ap() + regen, 0, next_stats->get_max_ap()));
+				} else {
+					next_stats->set_ap(next_stats->get_max_ap());
+				}
 			}
 		}
 

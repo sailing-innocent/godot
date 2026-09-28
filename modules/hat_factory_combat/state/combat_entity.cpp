@@ -42,9 +42,8 @@ bool CombatEntity::has_component(const StringName &p_name) const {
 }
 
 Ref<CombatComponent> CombatEntity::get_component(const StringName &p_name) const {
-	Ref<CombatComponent> comp;
-	comp = components.get(p_name);
-	return comp;
+	const Ref<CombatComponent> *comp = components.getptr(p_name);
+	return comp != nullptr ? *comp : Ref<CombatComponent>();
 }
 
 TypedArray<StringName> CombatEntity::get_component_names() const {
