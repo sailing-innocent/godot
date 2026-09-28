@@ -185,6 +185,9 @@ Ref<ActionResult> SkillResolver::resolve(const Ref<BattleState> &p_state, const 
 		TypedArray<int> order = next->get_turn_order();
 		for (int j = order.size() - 1; j >= 0; j--) {
 			if ((int)order[j] == (int)died[i]) {
+				if (j < next->get_turn_index()) {
+					next->set_turn_index(next->get_turn_index() - 1);
+				}
 				order.remove_at(j);
 			}
 		}
