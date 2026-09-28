@@ -22,6 +22,17 @@ void HexTerrainDef::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "cast_shadows"), &HexTerrainDef::set_cast_shadows);
 	ClassDB::bind_method(D_METHOD("get_cast_shadows"), &HexTerrainDef::get_cast_shadows);
 
+	ClassDB::bind_method(D_METHOD("set_move_cost", "move_cost"), &HexTerrainDef::set_move_cost);
+	ClassDB::bind_method(D_METHOD("get_move_cost"), &HexTerrainDef::get_move_cost);
+	ClassDB::bind_method(D_METHOD("set_blocks_movement", "blocks_movement"), &HexTerrainDef::set_blocks_movement);
+	ClassDB::bind_method(D_METHOD("get_blocks_movement"), &HexTerrainDef::get_blocks_movement);
+
+	ClassDB::bind_method(D_METHOD("set_transition_tags", "transition_tags"), &HexTerrainDef::set_transition_tags);
+	ClassDB::bind_method(D_METHOD("get_transition_tags"), &HexTerrainDef::get_transition_tags);
+
+	ClassDB::bind_method(D_METHOD("set_default_transition_profile", "default_transition_profile"), &HexTerrainDef::set_default_transition_profile);
+	ClassDB::bind_method(D_METHOD("get_default_transition_profile"), &HexTerrainDef::get_default_transition_profile);
+
 	ClassDB::bind_method(D_METHOD("set_variant_meshes", "variant_meshes"), &HexTerrainDef::set_variant_meshes);
 	ClassDB::bind_method(D_METHOD("get_variant_meshes"), &HexTerrainDef::get_variant_meshes);
 
@@ -43,6 +54,10 @@ void HexTerrainDef::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "physics_shape", PROPERTY_HINT_RESOURCE_TYPE, "Shape3D"), "set_physics_shape", "get_physics_shape");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "flags"), "set_flags", "get_flags");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cast_shadows"), "set_cast_shadows", "get_cast_shadows");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "move_cost"), "set_move_cost", "get_move_cost");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "blocks_movement"), "set_blocks_movement", "get_blocks_movement");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "transition_tags"), "set_transition_tags", "get_transition_tags");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "default_transition_profile", PROPERTY_HINT_RESOURCE_TYPE, "HexTransitionProfile"), "set_default_transition_profile", "get_default_transition_profile");
 
 	ADD_GROUP("Variants", "variant_");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "variant_meshes", PROPERTY_HINT_ARRAY_TYPE, "Mesh"), "set_variant_meshes", "get_variant_meshes");
@@ -101,6 +116,39 @@ void HexTerrainDef::set_cast_shadows(bool p_enabled) {
 bool HexTerrainDef::get_cast_shadows() const {
 	return cast_shadows;
 }
+
+void HexTerrainDef::set_move_cost(int p_cost) {
+	move_cost = MAX(p_cost, 1);
+}
+
+int HexTerrainDef::get_move_cost() const {
+	return move_cost;
+}
+
+void HexTerrainDef::set_blocks_movement(bool p_enabled) {
+	blocks_movement = p_enabled;
+}
+
+bool HexTerrainDef::get_blocks_movement() const {
+	return blocks_movement;
+}
+
+void HexTerrainDef::set_transition_tags(const PackedStringArray &p_tags) {
+	transition_tags = p_tags;
+}
+
+PackedStringArray HexTerrainDef::get_transition_tags() const {
+	return transition_tags;
+}
+
+void HexTerrainDef::set_default_transition_profile(const Ref<HexTransitionProfile> &p_profile) {
+	default_transition_profile = p_profile;
+}
+
+Ref<HexTransitionProfile> HexTerrainDef::get_default_transition_profile() const {
+	return default_transition_profile;
+}
+
 
 void HexTerrainDef::set_variant_meshes(const TypedArray<Mesh> &p_meshes) {
 	variant_meshes = p_meshes;

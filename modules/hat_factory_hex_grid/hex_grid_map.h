@@ -3,6 +3,8 @@
 
 #include "hex_grid_map_data.h"
 #include "hex_terrain_library.h"
+#include "hex_transition_generator.h"
+#include "hex_transition_library.h"
 #include "scene/3d/node_3d.h"
 #include "core/math/aabb.h"
 #include "core/math/vector2i.h"
@@ -47,10 +49,19 @@ private:
 			bool fill = false;
 		};
 		Vector<MultimeshInstance> multimesh_instances;
+
+		struct TransitionGroup {
+			RID instance;
+			RID multimesh;
+			StringName profile_id;
+		};
+		Vector<TransitionGroup> transition_groups;
 	};
 
 	Ref<HexGridMapData> grid_data;
 	Ref<HexTerrainLibrary> terrain_library;
+	Ref<HexTransitionLibrary> transition_library;
+	Ref<HexTransitionGenerator> transition_generator;
 
 	float hex_size = 2.0f;
 	float cell_height_step = 1.0f;
@@ -95,7 +106,9 @@ private:
 
 	void _grid_data_changed();
 	void _terrain_library_changed();
+	void _transition_library_changed();
 	void _update_physics_bodies_collision_properties();
+	void _update_chunk_transitions(const Vector2i &p_key, RID p_scenario);
 
 	static Vector2i _cube_round(float p_q, float p_r);
 
@@ -109,6 +122,12 @@ public:
 
 	void set_terrain_library(const Ref<HexTerrainLibrary> &p_lib);
 	Ref<HexTerrainLibrary> get_terrain_library() const;
+
+	void set_transition_library(const Ref<HexTransitionLibrary> &p_lib);
+	Ref<HexTransitionLibrary> get_transition_library() const;
+
+	void refresh_transitions();
+	TypedArray<HexTransitionInstanceData> get_transition_instances() const;
 
 	void set_hex_size(float p_size);
 	float get_hex_size() const;
@@ -149,6 +168,12 @@ public:
 	TypedArray<Vector2i> get_cells_in_ring(const Vector2i &p_center, int p_radius) const;
 	TypedArray<Vector2i> get_cells_in_disk(const Vector2i &p_center, int p_radius) const;
 	TypedArray<Vector2i> get_cells_in_range(const Vector2i &p_center, int p_radius) const;
+
+	TypedArray<Vector2i> get_reachable_cells(const Vector2i &p_origin, int p_range, uint32_t p_movement_flags = 0) const;
+	TypedArray<Vector2i> get_cells_in_line(const Vector2i &p_from, const Vector2i &p_to) const;
+	TypedArray<Vector2i> get_cells_in_cone(const Vector2i &p_origin, int p_direction, int p_range) const;
+	bool has_line_of_sight(const Vector2i &p_from, const Vector2i &p_to) const;
+	int get_movement_cost(const Vector2i &p_coord) const;
 
 	bool has_terrain(const Vector2i &p_coord) const;
 	AABB get_cell_world_bounds(const Vector2i &p_coord) const;

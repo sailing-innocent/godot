@@ -19,6 +19,9 @@ void HexGridMapData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_cell", "coord"), &HexGridMapData::has_cell);
 	ClassDB::bind_method(D_METHOD("get_used_cells"), &HexGridMapData::get_used_cells);
 	ClassDB::bind_method(D_METHOD("clear"), &HexGridMapData::clear);
+	ClassDB::bind_method(D_METHOD("to_dict"), &HexGridMapData::to_dict);
+	ClassDB::bind_static_method("HexGridMapData", D_METHOD("from_dict", "dict"), &HexGridMapData::from_dict);
+	ClassDB::bind_method(D_METHOD("clone"), &HexGridMapData::clone);
 
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "cells"), "set_cells", "get_cells");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "default_terrain"), "set_default_terrain", "get_default_terrain");
@@ -125,4 +128,48 @@ TypedArray<Vector2i> HexGridMapData::get_used_cells() const {
 void HexGridMapData::clear() {
 	cells.clear();
 	emit_changed();
+}
+
+Dictionary HexGridMapData::to_dict() const {
+	Dictionary d;
+	Dictionary cell_dict;
+	Array keys = cells.keys();
+	for (int i = 0; i < keys.size(); i++) {
+		Ref<HexCellData> cell = cells[keys[i]];
+		if (cell.is_valid()) {
+			cell_dict[keys[i]] = cell->to_dict();
+		}
+	}
+	d["cells"] = cell_dict;
+	d["default_terrain"] = default_terrain;
+	return d;
+}
+
+Ref<HexGridMapData> HexGridMapData::from_dict(const Dictionary &p_dict) {
+	Ref<HexGridMapData> data;
+	data.instantiate();
+	if (p_dict.has("default_terrain")) {
+		data->default_terrain = p_dict["default_terrain"];
+	}
+	if (p_dict.has("cells")) {
+		Dictionary cell_dict = p_dict["cells"];
+		Array keys = cell_dict.keys();
+		for (int i = 0; i < keys.size(); i++) {
+			Dictionary cd = cell_dict[keys[i]];
+			Ref<HexCellData> cell;
+			cell.instantiate();
+			cell->set_coord(keys[i]);
+			if (cd.has("terrain_id")) cell->set_terrain_id(cd["terrain_id"]);
+			if (cd.has("height")) cell->set_height(cd["height"]);
+			if (cd.has("variant")) cell->set_variant(cd["variant"]);
+			if (cd.has("flags")) cell->set_flags(cd["flags"]);
+			if (cd.has("dynamic_state")) cell->set_dynamic_state(cd["dynamic_state"]);
+			data->cells[keys[i]] = cell;
+		}
+	}
+	return data;
+}
+
+Ref<HexGridMapData> HexGridMapData::clone() const {
+	return from_dict(to_dict());
 }
