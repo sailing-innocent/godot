@@ -48,6 +48,10 @@ public:
 
 	void set_effects(const TypedArray<HexCellEffect> &p_effects);
 	TypedArray<HexCellEffect> get_effects() const;
+
+	Dictionary to_dict() const;
+	static Ref<HexCellData> from_dict(const Dictionary &p_dict);
+	Ref<HexCellData> clone() const;
 };
 
 #endif // HEX_CELL_DATA_H

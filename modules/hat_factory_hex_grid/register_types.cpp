@@ -11,6 +11,11 @@
 #include "hex_terrain_library.h"
 #include "hex_grid_map_data.h"
 #include "hex_grid_map.h"
+#include "hex_transition_profile.h"
+#include "hex_transition_def.h"
+#include "hex_transition_library.h"
+#include "hex_transition_instance_data.h"
+#include "hex_transition_generator.h"
 
 void initialize_hat_factory_hex_grid_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
@@ -20,6 +25,11 @@ void initialize_hat_factory_hex_grid_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(HexTerrainLibrary);
 		GDREGISTER_CLASS(HexGridMapData);
 		GDREGISTER_CLASS(HexGridMap);
+		GDREGISTER_CLASS(HexTransitionProfile);
+		GDREGISTER_CLASS(HexTransitionDef);
+		GDREGISTER_CLASS(HexTransitionLibrary);
+		GDREGISTER_CLASS(HexTransitionInstanceData);
+		GDREGISTER_CLASS(HexTransitionGenerator);
 	}
 }
 

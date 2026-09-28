@@ -1,0 +1,24 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_hat_factory_combat = env_modules.Clone()
+
+# Ensure includes resolve relative to the module root (e.g. #include "components/...").
+env_hat_factory_combat.Prepend(CPPPATH=[Dir(".")])
+
+# Module sources
+env_hat_factory_combat.add_source_files(env.modules_sources, "*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "components/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "state/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "action/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "action/resolvers/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "event/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "phase/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "skill/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "skill/effects/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "engine/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "query/*.cpp")
+env_hat_factory_combat.add_source_files(env.modules_sources, "serialization/*.cpp")

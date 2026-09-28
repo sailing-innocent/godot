@@ -14,7 +14,11 @@ class HexCellEffect : public Resource {
 	GDCLASS(HexCellEffect, Resource)
 
 protected:
-	static void _bind_methods() {}
+	static void _bind_methods();
+
+public:
+	virtual Dictionary to_dict() const;
+	virtual Ref<HexCellEffect> clone() const;
 };
 
 #endif // HEX_CELL_EFFECT_H

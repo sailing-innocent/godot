@@ -1,9 +1,11 @@
 #ifndef HEX_TERRAIN_DEF_H
 #define HEX_TERRAIN_DEF_H
 
+#include "hex_transition_profile.h"
 #include "core/io/resource.h"
 #include "core/string/string_name.h"
 #include "core/variant/typed_array.h"
+#include "core/variant/variant.h"
 #include "scene/resources/3d/shape_3d.h"
 #include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
@@ -27,6 +29,15 @@ class HexTerrainDef : public Resource {
 	Ref<Shape3D> physics_shape;
 	uint32_t flags = 0;
 	bool cast_shadows = true;
+
+	// Gameplay movement profile (consumed by the combat QueryAPI and by
+	// overworld travel pathfinding). Defaults preserve the legacy behavior:
+	// every terrain costs 1 and nothing blocks movement on its own.
+	int move_cost = 1;
+	bool blocks_movement = false;
+
+	PackedStringArray transition_tags;
+	Ref<HexTransitionProfile> default_transition_profile;
 
 	TypedArray<Mesh> variant_meshes;
 	TypedArray<Material> variant_materials;
@@ -56,6 +67,18 @@ public:
 
 	void set_cast_shadows(bool p_enabled);
 	bool get_cast_shadows() const;
+
+	void set_move_cost(int p_cost);
+	int get_move_cost() const;
+
+	void set_blocks_movement(bool p_enabled);
+	bool get_blocks_movement() const;
+
+	void set_transition_tags(const PackedStringArray &p_tags);
+	PackedStringArray get_transition_tags() const;
+
+	void set_default_transition_profile(const Ref<HexTransitionProfile> &p_profile);
+	Ref<HexTransitionProfile> get_default_transition_profile() const;
 
 	void set_variant_meshes(const TypedArray<Mesh> &p_meshes);
 	TypedArray<Mesh> get_variant_meshes() const;

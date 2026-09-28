@@ -3,6 +3,8 @@
 #include "core/core_string_names.h"
 #include "core/math/math_funcs.h"
 #include "core/string/ustring.h"
+#include "core/templates/list.h"
+#include "core/templates/pair.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
@@ -57,6 +59,11 @@ void HexGridMap::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_terrain_library", "terrain_library"), &HexGridMap::set_terrain_library);
 	ClassDB::bind_method(D_METHOD("get_terrain_library"), &HexGridMap::get_terrain_library);
 
+	ClassDB::bind_method(D_METHOD("set_transition_library", "transition_library"), &HexGridMap::set_transition_library);
+	ClassDB::bind_method(D_METHOD("get_transition_library"), &HexGridMap::get_transition_library);
+	ClassDB::bind_method(D_METHOD("refresh_transitions"), &HexGridMap::refresh_transitions);
+	ClassDB::bind_method(D_METHOD("get_transition_instances"), &HexGridMap::get_transition_instances);
+
 	ClassDB::bind_method(D_METHOD("set_hex_size", "hex_size"), &HexGridMap::set_hex_size);
 	ClassDB::bind_method(D_METHOD("get_hex_size"), &HexGridMap::get_hex_size);
 
@@ -96,6 +103,11 @@ void HexGridMap::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_cells_in_ring", "center", "radius"), &HexGridMap::get_cells_in_ring);
 	ClassDB::bind_method(D_METHOD("get_cells_in_disk", "center", "radius"), &HexGridMap::get_cells_in_disk);
 	ClassDB::bind_method(D_METHOD("get_cells_in_range", "center", "radius"), &HexGridMap::get_cells_in_range);
+	ClassDB::bind_method(D_METHOD("get_reachable_cells", "origin", "range", "movement_flags"), &HexGridMap::get_reachable_cells, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("get_cells_in_line", "from", "to"), &HexGridMap::get_cells_in_line);
+	ClassDB::bind_method(D_METHOD("get_cells_in_cone", "origin", "direction", "range"), &HexGridMap::get_cells_in_cone);
+	ClassDB::bind_method(D_METHOD("has_line_of_sight", "from", "to"), &HexGridMap::has_line_of_sight);
+	ClassDB::bind_method(D_METHOD("get_movement_cost", "coord"), &HexGridMap::get_movement_cost);
 
 	ClassDB::bind_method(D_METHOD("has_terrain", "coord"), &HexGridMap::has_terrain);
 	ClassDB::bind_method(D_METHOD("get_cell_world_bounds", "coord"), &HexGridMap::get_cell_world_bounds);
@@ -108,6 +120,7 @@ void HexGridMap::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "grid_data", PROPERTY_HINT_RESOURCE_TYPE, "HexGridMapData"), "set_grid_data", "get_grid_data");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "terrain_library", PROPERTY_HINT_RESOURCE_TYPE, "HexTerrainLibrary"), "set_terrain_library", "get_terrain_library");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "transition_library", PROPERTY_HINT_RESOURCE_TYPE, "HexTransitionLibrary"), "set_transition_library", "get_transition_library");
 
 	ADD_GROUP("Hex", "hex_");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "hex_size"), "set_hex_size", "get_hex_size");
@@ -248,6 +261,17 @@ void HexGridMap::_cleanup_chunk(const Vector2i &p_key) {
 	}
 	chunk->multimesh_instances.clear();
 
+	for (int i = 0; i < chunk->transition_groups.size(); i++) {
+		const Chunk::TransitionGroup &tg = chunk->transition_groups[i];
+		if (tg.instance.is_valid()) {
+			RS::get_singleton()->free_rid(tg.instance);
+		}
+		if (tg.multimesh.is_valid()) {
+			RS::get_singleton()->free_rid(tg.multimesh);
+		}
+	}
+	chunk->transition_groups.clear();
+
 #ifndef PHYSICS_3D_DISABLED
 	if (chunk->static_body.is_valid()) {
 		PhysicsServer3D::get_singleton()->free_rid(chunk->static_body);
@@ -313,7 +337,7 @@ void HexGridMap::_update_chunks_callback() {
 		}
 	}
 
-	for (int i = 0; i < to_remove.size(); i++) {
+	for (uint32_t i = 0; i < to_remove.size(); i++) {
 		_cleanup_chunk(to_remove[i]);
 	}
 
@@ -345,6 +369,17 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 		}
 	}
 	chunk->multimesh_instances.clear();
+
+	for (int i = 0; i < chunk->transition_groups.size(); i++) {
+		const Chunk::TransitionGroup &tg = chunk->transition_groups[i];
+		if (tg.instance.is_valid()) {
+			RS::get_singleton()->free_rid(tg.instance);
+		}
+		if (tg.multimesh.is_valid()) {
+			RS::get_singleton()->free_rid(tg.multimesh);
+		}
+	}
+	chunk->transition_groups.clear();
 
 	if (chunk->cells.is_empty()) {
 		chunk->dirty = false;
@@ -501,8 +536,85 @@ bool HexGridMap::_update_chunk(const Vector2i &p_key) {
 		chunk->multimesh_instances.push_back(mmi);
 	}
 
+	_update_chunk_transitions(p_key, scenario);
+
 	chunk->dirty = false;
 	return false;
+}
+
+void HexGridMap::_update_chunk_transitions(const Vector2i &p_key, RID p_scenario) {
+	if (!chunk_map.has(p_key)) {
+		return;
+	}
+	Chunk *chunk = chunk_map[p_key];
+
+	if (transition_library.is_null() || transition_generator.is_null()) {
+		return;
+	}
+
+	HashMap<StringName, LocalVector<Transform3D>> groups;
+	HashMap<StringName, Ref<HexTransitionProfile>> profiles;
+
+	for (const Vector2i &cell_coord : chunk->cells) {
+		TypedArray<HexTransitionInstanceData> instances = transition_generator->generate_for_coord(cell_coord);
+		for (int i = 0; i < instances.size(); i++) {
+			Ref<HexTransitionInstanceData> inst = instances[i];
+			if (inst.is_null() || inst->get_profile().is_null()) {
+				continue;
+			}
+			Ref<HexTransitionProfile> profile = inst->get_profile();
+			if (profile->get_mesh().is_null()) {
+				continue;
+			}
+			StringName pid = profile->get_profile_id();
+			if (!groups.has(pid)) {
+				groups[pid] = LocalVector<Transform3D>();
+				profiles[pid] = profile;
+			}
+			groups[pid].push_back(inst->get_transform());
+		}
+	}
+
+	for (KeyValue<StringName, LocalVector<Transform3D>> &E : groups) {
+		Ref<HexTransitionProfile> profile = profiles[E.key];
+		if (profile.is_null() || profile->get_mesh().is_null()) {
+			continue;
+		}
+
+		int instance_count = E.value.size();
+		if (instance_count == 0) {
+			continue;
+		}
+
+		RID mm = RS::get_singleton()->multimesh_create();
+		RS::get_singleton()->multimesh_allocate_data(mm, instance_count, RSE::MULTIMESH_TRANSFORM_3D);
+		RS::get_singleton()->multimesh_set_mesh(mm, profile->get_mesh()->get_rid());
+
+		for (int i = 0; i < instance_count; i++) {
+			RS::get_singleton()->multimesh_instance_set_transform(mm, i, E.value[i]);
+		}
+
+		RID inst = RS::get_singleton()->instance_create();
+		RS::get_singleton()->instance_set_base(inst, mm);
+
+		if (p_scenario.is_valid()) {
+			RS::get_singleton()->instance_set_scenario(inst, p_scenario);
+			RS::get_singleton()->instance_set_transform(inst, get_global_transform());
+		}
+
+		if (profile->get_material().is_valid()) {
+			RS::get_singleton()->instance_geometry_set_material_override(inst, profile->get_material()->get_rid());
+		}
+
+		RSE::ShadowCastingSetting shadow = profile->get_cast_shadows() ? RSE::SHADOW_CASTING_SETTING_ON : RSE::SHADOW_CASTING_SETTING_OFF;
+		RS::get_singleton()->instance_geometry_set_cast_shadows_setting(inst, shadow);
+
+		Chunk::TransitionGroup tg;
+		tg.instance = inst;
+		tg.multimesh = mm;
+		tg.profile_id = E.key;
+		chunk->transition_groups.push_back(tg);
+	}
 }
 
 void HexGridMap::_chunk_enter_world(const Vector2i &p_key) {
@@ -517,6 +629,12 @@ void HexGridMap::_chunk_enter_world(const Vector2i &p_key) {
 		const Chunk::MultimeshInstance &mmi = chunk->multimesh_instances[i];
 		RS::get_singleton()->instance_set_scenario(mmi.instance, scenario);
 		RS::get_singleton()->instance_set_transform(mmi.instance, gt);
+	}
+
+	for (int i = 0; i < chunk->transition_groups.size(); i++) {
+		const Chunk::TransitionGroup &tg = chunk->transition_groups[i];
+		RS::get_singleton()->instance_set_scenario(tg.instance, scenario);
+		RS::get_singleton()->instance_set_transform(tg.instance, gt);
 	}
 
 #ifndef PHYSICS_3D_DISABLED
@@ -536,6 +654,11 @@ void HexGridMap::_chunk_exit_world(const Vector2i &p_key) {
 		RS::get_singleton()->instance_set_scenario(mmi.instance, RID());
 	}
 
+	for (int i = 0; i < chunk->transition_groups.size(); i++) {
+		const Chunk::TransitionGroup &tg = chunk->transition_groups[i];
+		RS::get_singleton()->instance_set_scenario(tg.instance, RID());
+	}
+
 #ifndef PHYSICS_3D_DISABLED
 	PhysicsServer3D::get_singleton()->body_set_space(chunk->static_body, RID());
 #endif
@@ -553,6 +676,11 @@ void HexGridMap::_update_chunk_transform(const Vector2i &p_key) {
 		RS::get_singleton()->instance_set_transform(mmi.instance, gt);
 	}
 
+	for (int i = 0; i < chunk->transition_groups.size(); i++) {
+		const Chunk::TransitionGroup &tg = chunk->transition_groups[i];
+		RS::get_singleton()->instance_set_transform(tg.instance, gt);
+	}
+
 #ifndef PHYSICS_3D_DISABLED
 	PhysicsServer3D::get_singleton()->body_set_state(chunk->static_body, PhysicsServer3D::BODY_STATE_TRANSFORM, gt);
 	if (_in_tree) {
@@ -567,6 +695,11 @@ void HexGridMap::_grid_data_changed() {
 }
 
 void HexGridMap::_terrain_library_changed() {
+	_queue_chunks_dirty();
+	emit_signal(CoreStringName(changed));
+}
+
+void HexGridMap::_transition_library_changed() {
 	_queue_chunks_dirty();
 	emit_signal(CoreStringName(changed));
 }
@@ -617,6 +750,40 @@ void HexGridMap::set_terrain_library(const Ref<HexTerrainLibrary> &p_lib) {
 
 Ref<HexTerrainLibrary> HexGridMap::get_terrain_library() const {
 	return terrain_library;
+}
+
+void HexGridMap::set_transition_library(const Ref<HexTransitionLibrary> &p_lib) {
+	if (transition_library == p_lib) {
+		return;
+	}
+	if (transition_library.is_valid()) {
+		transition_library->disconnect_changed(callable_mp(this, &HexGridMap::_transition_library_changed));
+	}
+	transition_library = p_lib;
+	if (transition_library.is_valid()) {
+		transition_library->connect_changed(callable_mp(this, &HexGridMap::_transition_library_changed));
+	}
+	if (transition_generator.is_null()) {
+		transition_generator.instantiate();
+	}
+	transition_generator->setup(this, transition_library);
+	_queue_chunks_dirty();
+	emit_signal(CoreStringName(changed));
+}
+
+Ref<HexTransitionLibrary> HexGridMap::get_transition_library() const {
+	return transition_library;
+}
+
+void HexGridMap::refresh_transitions() {
+	_queue_chunks_dirty();
+}
+
+TypedArray<HexTransitionInstanceData> HexGridMap::get_transition_instances() const {
+	if (transition_generator.is_null()) {
+		return TypedArray<HexTransitionInstanceData>();
+	}
+	return transition_generator->generate_all();
 }
 
 void HexGridMap::set_hex_size(float p_size) {
@@ -860,6 +1027,127 @@ TypedArray<Vector2i> HexGridMap::get_cells_in_range(const Vector2i &p_center, in
 	return result;
 }
 
+TypedArray<Vector2i> HexGridMap::get_reachable_cells(const Vector2i &p_origin, int p_range, uint32_t p_movement_flags) const {
+	TypedArray<Vector2i> result;
+	HashSet<Vector2i> visited;
+	List<Pair<Vector2i, int>> queue;
+	queue.push_back(Pair<Vector2i, int>(p_origin, 0));
+	visited.insert(p_origin);
+	while (queue.size() > 0) {
+		Pair<Vector2i, int> current = queue.front()->get();
+		Vector2i coord = current.first;
+		int dist = current.second;
+		queue.pop_front();
+		if (dist > 0) {
+			result.push_back(coord);
+		}
+		if (dist >= p_range) {
+			continue;
+		}
+		TypedArray<Vector2i> neighbors = get_all_neighbors(coord);
+		for (int i = 0; i < neighbors.size(); i++) {
+			Vector2i n = neighbors[i];
+			if (visited.has(n)) {
+				continue;
+			}
+			int cost = get_movement_cost(n);
+			if (cost < 0) {
+				continue; // impassable
+			}
+			visited.insert(n);
+			queue.push_back(Pair<Vector2i, int>(n, dist + cost));
+		}
+	}
+	return result;
+}
+
+TypedArray<Vector2i> HexGridMap::get_cells_in_line(const Vector2i &p_from, const Vector2i &p_to) const {
+	TypedArray<Vector2i> result;
+	// Axial line interpolation with cube coordinates.
+	int x1 = p_from.x;
+	int z1 = p_from.y;
+	int y1 = -x1 - z1;
+	int x2 = p_to.x;
+	int z2 = p_to.y;
+	int y2 = -x2 - z2;
+	int dist = (Math::abs(x1 - x2) + Math::abs(y1 - y2) + Math::abs(z1 - z2)) / 2;
+	if (dist == 0) {
+		result.push_back(p_from);
+		return result;
+	}
+	for (int i = 0; i <= dist; i++) {
+		float t = dist == 0 ? 0.0f : (float)i / (float)dist;
+		float x = x1 + (x2 - x1) * t;
+		float y = y1 + (y2 - y1) * t;
+		float z = z1 + (z2 - z1) * t;
+		int rx = (int)Math::round(x);
+		int ry = (int)Math::round(y);
+		int rz = (int)Math::round(z);
+		result.push_back(Vector2i(rx, rz));
+	}
+	return result;
+}
+
+TypedArray<Vector2i> HexGridMap::get_cells_in_cone(const Vector2i &p_origin, int p_direction, int p_range) const {
+	TypedArray<Vector2i> result;
+	TypedArray<Vector2i> disk = get_cells_in_disk(p_origin, p_range);
+	for (int i = 0; i < disk.size(); i++) {
+		Vector2i c = disk[i];
+		// Cone covers 60 degrees centered on the primary neighbor direction.
+		// Accept if the angle from origin to c is within +/- 30 degrees of direction.
+		// Simplified: accept cells whose neighbor-from-origin direction matches p_direction.
+		Vector2i diff = c - p_origin;
+		if (diff == Vector2i()) {
+			continue;
+		}
+		for (int d = 0; d < 6; d++) {
+			Vector2i n = get_neighbor(p_origin, d);
+			if (n == c) {
+				int dd = Math::abs(d - p_direction);
+				if (dd <= 1 || dd >= 5) {
+					result.push_back(c);
+				}
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+bool HexGridMap::has_line_of_sight(const Vector2i &p_from, const Vector2i &p_to) const {
+	TypedArray<Vector2i> line = get_cells_in_line(p_from, p_to);
+	for (int i = 0; i < line.size(); i++) {
+		Vector2i c = line[i];
+		if (c == p_from || c == p_to) {
+			continue;
+		}
+		int cost = get_movement_cost(c);
+		if (cost < 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+int HexGridMap::get_movement_cost(const Vector2i &p_coord) const {
+	Ref<HexCellData> cell = get_cell(p_coord);
+	if (cell.is_null()) {
+		return -1;
+	}
+	if (terrain_library.is_null()) {
+		return 1;
+	}
+	Ref<HexTerrainDef> def = terrain_library->get_terrain(cell->get_terrain_id());
+	if (def.is_null()) {
+		return 1;
+	}
+	uint32_t flags = def->get_flags();
+	if (flags & 1) { // BLOCK_MOVEMENT
+		return -1;
+	}
+	return 1;
+}
+
 TypedArray<Vector2i> HexGridMap::get_all_neighbors(const Vector2i &p_coord) const {
 	TypedArray<Vector2i> result;
 	for (int i = 0; i < 6; i++) {
@@ -1001,6 +1289,8 @@ void HexGridMap::refresh() {
 
 HexGridMap::HexGridMap() {
 	set_notify_transform(true);
+	transition_generator.instantiate();
+	transition_generator->setup(this, transition_library);
 }
 
 HexGridMap::~HexGridMap() {

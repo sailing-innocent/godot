@@ -23,6 +23,9 @@ void HexCellData::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_effects", "effects"), &HexCellData::set_effects);
 	ClassDB::bind_method(D_METHOD("get_effects"), &HexCellData::get_effects);
+	ClassDB::bind_method(D_METHOD("to_dict"), &HexCellData::to_dict);
+	ClassDB::bind_static_method("HexCellData", D_METHOD("from_dict", "dict"), &HexCellData::from_dict);
+	ClassDB::bind_method(D_METHOD("clone"), &HexCellData::clone);
 
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "coord"), "set_coord", "get_coord");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "terrain_id"), "set_terrain_id", "get_terrain_id");
@@ -87,4 +90,42 @@ void HexCellData::set_effects(const TypedArray<HexCellEffect> &p_effects) {
 
 TypedArray<HexCellEffect> HexCellData::get_effects() const {
 	return effects;
+}
+
+Dictionary HexCellData::to_dict() const {
+	Dictionary d;
+	d["coord"] = coord;
+	d["terrain_id"] = terrain_id;
+	d["height"] = (int)height;
+	d["variant"] = variant;
+	d["flags"] = (int)flags;
+	d["dynamic_state"] = dynamic_state;
+	Array eff;
+	for (int i = 0; i < effects.size(); i++) {
+		Ref<HexCellEffect> e = effects[i];
+		if (e.is_valid()) eff.push_back(e->to_dict());
+	}
+	d["effects"] = eff;
+	return d;
+}
+
+Ref<HexCellData> HexCellData::from_dict(const Dictionary &p_dict) {
+	Ref<HexCellData> cell;
+	cell.instantiate();
+	if (p_dict.has("coord")) cell->coord = p_dict["coord"];
+	if (p_dict.has("terrain_id")) cell->terrain_id = p_dict["terrain_id"];
+	if (p_dict.has("height")) cell->height = p_dict["height"];
+	if (p_dict.has("variant")) cell->variant = p_dict["variant"];
+	if (p_dict.has("flags")) cell->flags = (uint32_t)(int)p_dict["flags"];
+	if (p_dict.has("dynamic_state")) cell->dynamic_state = p_dict["dynamic_state"];
+	if (p_dict.has("effects")) {
+		Array eff = p_dict["effects"];
+		// Effects are kept as raw dictionaries; reconstruction via HexCellEffect factory not required for base snapshot.
+		cell->effects = eff;
+	}
+	return cell;
+}
+
+Ref<HexCellData> HexCellData::clone() const {
+	return from_dict(to_dict());
 }

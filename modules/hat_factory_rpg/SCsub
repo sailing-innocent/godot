@@ -1,0 +1,15 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_hat_factory_rpg = env_modules.Clone()
+env_hat_factory_rpg.Prepend(CPPPATH=[Dir(".")])
+
+env_hat_factory_rpg.add_source_files(env.modules_sources, "*.cpp")
+env_hat_factory_rpg.add_source_files(env.modules_sources, "item/*.cpp")
+env_hat_factory_rpg.add_source_files(env.modules_sources, "inventory/*.cpp")
+env_hat_factory_rpg.add_source_files(env.modules_sources, "equipment/*.cpp")
+env_hat_factory_rpg.add_source_files(env.modules_sources, "economy/*.cpp")
+env_hat_factory_rpg.add_source_files(env.modules_sources, "serialization/*.cpp")

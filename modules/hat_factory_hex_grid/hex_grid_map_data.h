@@ -42,6 +42,10 @@ public:
 	bool has_cell(const Vector2i &p_coord) const;
 	TypedArray<Vector2i> get_used_cells() const;
 	void clear();
+
+	Dictionary to_dict() const;
+	static Ref<HexGridMapData> from_dict(const Dictionary &p_dict);
+	Ref<HexGridMapData> clone() const;
 };
 
 #endif // HEX_GRID_MAP_DATA_H
