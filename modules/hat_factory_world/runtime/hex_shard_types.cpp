@@ -16,6 +16,7 @@ void HexShardPage::init_empty(int32_t p_base_offset) {
 	object_durability.resize(PAGE_CELLS);
 	edges.resize(PAGE_CELLS * EDGE_SLOTS);
 	edges_enabled.resize(PAGE_CELLS * EDGE_SLOTS);
+	edges_durability.resize(PAGE_CELLS * EDGE_SLOTS);
 	area_effects.resize(PAGE_CELLS);
 	base_terrain.fill(NO_DATA);
 	elevation.fill(0);
@@ -24,6 +25,7 @@ void HexShardPage::init_empty(int32_t p_base_offset) {
 	object_durability.fill(-1);
 	edges.fill(0);
 	edges_enabled.fill(0);
+	edges_durability.fill(-1);
 	area_effects.fill(0);
 }
 
@@ -41,6 +43,22 @@ bool HexShardPage::is_empty() const {
 	return true;
 }
 
+Ref<HexShardPage> HexShardPage::clone() const {
+	Ref<HexShardPage> p;
+	p.instantiate();
+	p->base_offset = base_offset;
+	p->base_terrain = base_terrain;
+	p->elevation = elevation;
+	p->surfaces = surfaces;
+	p->object = object;
+	p->object_durability = object_durability;
+	p->edges = edges;
+	p->edges_enabled = edges_enabled;
+	p->edges_durability = edges_durability;
+	p->area_effects = area_effects;
+	return p;
+}
+
 Dictionary HexShardPage::to_dict() const {
 	Dictionary d;
 	d[StringName("base_offset")] = base_offset;
@@ -51,6 +69,7 @@ Dictionary HexShardPage::to_dict() const {
 	d[StringName("object_durability")] = object_durability;
 	d[StringName("edges")] = edges;
 	d[StringName("edges_enabled")] = edges_enabled;
+	d[StringName("edges_durability")] = edges_durability;
 	d[StringName("area_effects")] = area_effects;
 	return d;
 }
@@ -66,6 +85,7 @@ Ref<HexShardPage> HexShardPage::from_dict(const Dictionary &p_dict) {
 	p->object_durability = p_dict.get(StringName("object_durability"), PackedInt32Array());
 	p->edges = p_dict.get(StringName("edges"), PackedInt32Array());
 	p->edges_enabled = p_dict.get(StringName("edges_enabled"), PackedInt32Array());
+	p->edges_durability = p_dict.get(StringName("edges_durability"), PackedInt32Array());
 	p->area_effects = p_dict.get(StringName("area_effects"), PackedInt64Array());
 	return p;
 }
@@ -109,7 +129,7 @@ Ref<HexShardState> HexShardState::from_dict(const Dictionary &p_dict) {
 	for (const Variant &k : keys) {
 		const int idx = (int)k;
 		if (idx >= 0 && idx < PAGE_COUNT) {
-			s->pages[idx] = HexShardPage::from_dict(pages_dict[k]);
+			s->pages.write[idx] = HexShardPage::from_dict(pages_dict[k]);
 		}
 	}
 	s->features = p_dict.get(StringName("features"), Dictionary());

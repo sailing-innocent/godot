@@ -28,6 +28,7 @@ void HexMapCommand::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_payload_value", "key", "default"), &HexMapCommand::get_payload_value, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("to_dict"), &HexMapCommand::to_dict);
 	ClassDB::bind_static_method("HexMapCommand", D_METHOD("from_dict", "dict"), &HexMapCommand::from_dict);
+	ClassDB::bind_static_method("HexMapCommand", D_METHOD("make", "operation", "coord"), &HexMapCommand::make);
 	ClassDB::bind_static_method("HexMapCommand", D_METHOD("set_cell_base", "coord", "terrain_id"), &HexMapCommand::set_cell_base);
 	ClassDB::bind_static_method("HexMapCommand", D_METHOD("set_cell_elevation", "coord", "elevation"), &HexMapCommand::set_cell_elevation);
 	ClassDB::bind_static_method("HexMapCommand", D_METHOD("set_edge", "coord", "direction", "edge_type_id", "enabled"), &HexMapCommand::set_edge);

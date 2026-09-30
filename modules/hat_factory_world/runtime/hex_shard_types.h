@@ -15,8 +15,7 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/vector.h"
 #include "core/variant/dictionary.h"
-#include "core/variant/packed_int32_array.h"
-#include "core/variant/packed_int64_array.h"
+#include "core/variant/variant.h"
 
 namespace hf_world {
 
@@ -80,10 +79,12 @@ public:
 	PackedInt32Array object_durability; // per cell: -1 = n/a
 	PackedInt32Array edges; // per cell*6: edge type index+1, 0 = open edge
 	PackedInt32Array edges_enabled; // per cell*6: 0/1 (closed gates / shortcuts)
+	PackedInt32Array edges_durability; // per cell*6: instance durability, -1 = n/a
 	PackedInt64Array area_effects; // per cell: bitmask of compiled area effect indices
 
 	void init_empty(int32_t p_base_offset);
 	bool is_empty() const; // all NO_DATA / zero — allows base-page fallthrough
+	Ref<HexShardPage> clone() const; // deep copy for COW
 	Dictionary to_dict() const;
 	static Ref<HexShardPage> from_dict(const Dictionary &p_dict);
 };
@@ -98,10 +99,10 @@ public:
 	int32_t chunk_q = 0;
 	int32_t chunk_r = 0;
 	Vector<Ref<HexShardPage>> pages; // indexed by page id, null = read base
-	Dictionary features; // feature seq(int64) -> {kind, linear, data}
-	int64 version = 0; // global_seq at which this generation was committed
+	Dictionary features; // feature seq(int64_t) -> {kind, linear, data}
+	int64_t version = 0; // global_seq at which this generation was committed
 
-	Ref<HexShardState> clone_for_write(int64 p_new_version) const;
+	Ref<HexShardState> clone_for_write(int64_t p_new_version) const;
 	Dictionary to_dict() const;
 	static Ref<HexShardState> from_dict(const Dictionary &p_dict);
 };
