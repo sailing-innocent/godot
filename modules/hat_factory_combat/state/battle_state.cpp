@@ -108,7 +108,7 @@ Ref<BattleState> BattleState::clone() const {
 	s->phase = phase;
 	s->turn_index = turn_index;
 	s->current_actor = current_actor;
-	s->grid_data = grid_data.is_valid() ? Ref<HexGridMapData>(grid_data->duplicate()) : Ref<HexGridMapData>();
+	s->grid_data = grid_data.is_valid() ? grid_data->clone() : Ref<HexGridMapData>();
 	s->terrain_library = terrain_library.is_valid() ? Ref<HexTerrainLibrary>(terrain_library->duplicate()) : Ref<HexTerrainLibrary>();
 	s->rules = rules.is_valid() ? rules->clone() : Ref<RuleSet>();
 	s->turn_order = turn_order.duplicate();
@@ -274,11 +274,7 @@ Ref<BattleState> BattleState::from_snapshot(const Dictionary &p_snapshot) {
 
 	if (p_snapshot.has("grid_data")) {
 		Dictionary gd = p_snapshot["grid_data"];
-		Ref<HexGridMapData> grid;
-		grid.instantiate();
-		if (gd.has("cells")) grid->set_cells(gd["cells"]);
-		if (gd.has("default_terrain")) grid->set_default_terrain(gd["default_terrain"]);
-		s->grid_data = grid;
+		s->grid_data = HexGridMapData::from_dict(gd);
 	}
 	if (p_snapshot.has("terrain_library")) {
 		Dictionary tl = p_snapshot["terrain_library"];

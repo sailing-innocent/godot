@@ -39,6 +39,8 @@
 #include "skill/effects/damage_effect.h"
 #include "skill/effects/heal_effect.h"
 #include "skill/effects/apply_status_effect.h"
+#include "skill/effects/push_effect.h"
+#include "skill/effects/change_terrain_effect.h"
 
 #include "engine/battle_config.h"
 #include "engine/battle_engine.h"
@@ -87,6 +89,8 @@ void initialize_hat_factory_combat_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(DamageEffect);
 		GDREGISTER_CLASS(HealEffect);
 		GDREGISTER_CLASS(ApplyStatusEffect);
+		GDREGISTER_CLASS(PushEffect);
+		GDREGISTER_CLASS(ChangeTerrainEffect);
 
 		GDREGISTER_CLASS(BattleConfig);
 		GDREGISTER_CLASS(BattleEngine);

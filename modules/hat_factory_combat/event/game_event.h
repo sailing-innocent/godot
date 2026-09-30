@@ -26,6 +26,7 @@ public:
 		ACTION_REJECTED = 11,
 		BATTLE_ENDED = 12,
 		ITEM_USED = 13,
+		TERRAIN_CHANGED = 14,
 	};
 
 private:

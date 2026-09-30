@@ -155,7 +155,17 @@ Ref<HexGridMapData> HexGridMapData::from_dict(const Dictionary &p_dict) {
 		Dictionary cell_dict = p_dict["cells"];
 		Array keys = cell_dict.keys();
 		for (int i = 0; i < keys.size(); i++) {
-			Dictionary cd = cell_dict[keys[i]];
+			Variant raw = cell_dict[keys[i]];
+			Dictionary cd;
+			if (raw.get_type() == Variant::OBJECT) {
+				Ref<HexCellData> source = raw;
+				if (source.is_null()) {
+					continue;
+				}
+				cd = source->to_dict();
+			} else {
+				cd = raw;
+			}
 			Ref<HexCellData> cell;
 			cell.instantiate();
 			cell->set_coord(keys[i]);
