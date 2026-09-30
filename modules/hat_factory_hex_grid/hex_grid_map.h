@@ -169,6 +169,10 @@ public:
 	TypedArray<Vector2i> get_cells_in_disk(const Vector2i &p_center, int p_radius) const;
 	TypedArray<Vector2i> get_cells_in_range(const Vector2i &p_center, int p_radius) const;
 
+	// DEPRECATED (dual-map v1, 2026-10): node-local queries are kept for legacy
+	// compatibility only; the single source of spatial truth is
+	// hat_factory_world's HexSpatialQuery (scale-explicit, occupancy-aware,
+	// typed failure reasons). New code must not call these.
 	TypedArray<Vector2i> get_reachable_cells(const Vector2i &p_origin, int p_range, uint32_t p_movement_flags = 0) const;
 	TypedArray<Vector2i> get_cells_in_line(const Vector2i &p_from, const Vector2i &p_to) const;
 	TypedArray<Vector2i> get_cells_in_cone(const Vector2i &p_origin, int p_direction, int p_range) const;
