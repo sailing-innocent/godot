@@ -11,6 +11,7 @@
 
 void HexWorldRun::_bind_methods() {
 	ClassDB::bind_static_method("HexWorldRun", D_METHOD("create", "world_template", "detail_templates", "tables", "seed"), &HexWorldRun::create);
+	ClassDB::bind_static_method("HexWorldRun", D_METHOD("get_last_create_error"), &HexWorldRun::get_last_create_error);
 	ClassDB::bind_method(D_METHOD("get_seed"), &HexWorldRun::get_seed);
 	ClassDB::bind_method(D_METHOD("get_world_template"), &HexWorldRun::get_world_template);
 	ClassDB::bind_method(D_METHOD("get_tables"), &HexWorldRun::get_tables);
@@ -174,10 +175,25 @@ bool HexWorldRun::_materialize_base(String &r_error) {
 	return true;
 }
 
+// 创建失败原因探针：create 的各拒绝分支在此留痕，GDScript 可读取并
+// 呈现给验收者（设备上没有控制台，ERR_FAIL 消息不可见）。
+static thread_local String g_last_create_error;
+
+String HexWorldRun::get_last_create_error() {
+	return g_last_create_error;
+}
+
 Ref<HexWorldRun> HexWorldRun::create(const Ref<HexWorldTemplate> &p_world_template, const TypedArray<HexDetailTemplate> &p_detail_templates, const Ref<HexTerrainTableSet> &p_tables, int64_t p_seed) {
-	ERR_FAIL_COND_V(p_world_template.is_null(), Ref<HexWorldRun>());
+	g_last_create_error = "";
+	if (p_world_template.is_null()) {
+		g_last_create_error = "world template is null";
+		ERR_FAIL_V(Ref<HexWorldRun>());
+	}
 	const String verr = p_world_template->validate();
-	ERR_FAIL_COND_V_MSG(!verr.is_empty(), Ref<HexWorldRun>(), "HexWorldRun::create: world template invalid: " + verr);
+	if (!verr.is_empty()) {
+		g_last_create_error = "world template invalid: " + verr;
+		ERR_FAIL_V(Ref<HexWorldRun>());
+	}
 	Ref<HexWorldRun> run;
 	run.instantiate();
 	run->world_template = p_world_template;
@@ -186,7 +202,10 @@ Ref<HexWorldRun> HexWorldRun::create(const Ref<HexWorldTemplate> &p_world_templa
 	run->seed = p_seed;
 	run->journal.instantiate();
 	String err;
-	ERR_FAIL_COND_V_MSG(!run->_materialize_base(err), Ref<HexWorldRun>(), "HexWorldRun::create: materialize failed: " + err);
+	if (!run->_materialize_base(err)) {
+		g_last_create_error = "materialize failed: " + err;
+		ERR_FAIL_V(Ref<HexWorldRun>());
+	}
 	run->committed->set_run(run);
 	return run;
 }
