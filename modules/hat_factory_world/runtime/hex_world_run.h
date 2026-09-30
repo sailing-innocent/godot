@@ -44,6 +44,8 @@ private:
 
 public:
 	static Ref<HexWorldRun> create(const Ref<HexWorldTemplate> &p_world_template, const TypedArray<HexDetailTemplate> &p_detail_templates, const Ref<HexTerrainTableSet> &p_tables, int64_t p_seed);
+	/** 最近一次 create 失败的精确原因（探针，供无控制台的设备端呈现）。 */
+	static String get_last_create_error();
 
 	void set_seed(int64_t p_seed);
 	int64_t get_seed() const;

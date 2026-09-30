@@ -10,7 +10,7 @@
 #ifndef WORLD_IDS_H
 #define WORLD_IDS_H
 
-#include "core/object/ref_counted.h"
+#include "core/io/resource.h"
 #include "core/string/string_name.h"
 #include "core/variant/dictionary.h"
 #include "core/variant/typed_array.h"
@@ -19,7 +19,7 @@
  * @brief Identifies a continuous map instance (e.g. "demo_world").
  * Stable across shards, streaming and save/load.
  */
-class MapId : public RefCounted {
+class MapId : public Resource {
 	GDCLASS(MapId, RefCounted)
 	StringName value;
 
@@ -42,7 +42,7 @@ public:
  * @brief Version of an immutable template: schema + generator versions.
  * Incompatible schema versions must be rejected on load (no silent replay).
  */
-class TemplateVersion : public RefCounted {
+class TemplateVersion : public Resource {
 	GDCLASS(TemplateVersion, RefCounted)
 	int schema_version = 1;
 	int generator_version = 1;
@@ -67,7 +67,7 @@ public:
 /**
  * @brief Axial coordinate of a macro/world cell (Scale::WORLD).
  */
-class WorldCellCoord : public RefCounted {
+class WorldCellCoord : public Resource {
 	GDCLASS(WorldCellCoord, RefCounted)
 	int32_t q = 0;
 	int32_t r = 0;
@@ -99,7 +99,7 @@ public:
  * @brief Axial coordinate of a micro/battle cell (Scale::MICRO).
  * detail_level starts at 1 for the first subdivision below world scale.
  */
-class MicroCoord : public RefCounted {
+class MicroCoord : public Resource {
 	GDCLASS(MicroCoord, RefCounted)
 	int32_t q = 0;
 	int32_t r = 0;
@@ -132,7 +132,7 @@ public:
  * A feature keeps one owner ID across cells, edges, shards and streaming
  * reloads; it never receives a new ID on stream-in.
  */
-class FeatureId : public RefCounted {
+class FeatureId : public Resource {
 	GDCLASS(FeatureId, RefCounted)
 	StringName kind; // "gate" / "bridge" / "reef" / "trigger" / ...
 	int64_t seq = 0; // stable sequence, unique per (map_id, kind)
@@ -160,7 +160,7 @@ public:
  * Endpoints are stored lexicographically (q, then r) so the key is
  * independent of construction/load order.
  */
-class EdgeKey : public RefCounted {
+class EdgeKey : public Resource {
 	GDCLASS(EdgeKey, RefCounted)
 	Ref<WorldCellCoord> endpoint_a;
 	Ref<WorldCellCoord> endpoint_b;
