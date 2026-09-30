@@ -157,6 +157,24 @@ StepEval evaluate_step(const Ref<HexRegionSnapshot> &p_view, const CellInfo &p_f
 	}
 	const int cell_cost = p_profile->get_cost_for_tags(tags);
 	if (cell_cost < 0) {
+		// Bridge/ford crossing: an enabled, non-blocking walk-action edge
+		// carries the mover over a surface the profile cannot enter (e.g.
+		// deep water under a bridge). Without this, bridges over water were
+		// unusable — the surface rejection fired before edge mediation.
+		// Hop-type destroyed forms (gap) deliberately do NOT bypass: hopping
+		// a narrow seam still lands in the blocking surface.
+		const int crossing_edge = p_from.edges[p_dir];
+		if (crossing_edge != 0 && p_from.edge_enabled[p_dir]) {
+			Ref<HexEdgeTypeDef> crossing_def = tables->get_edge_type(crossing_edge - 1);
+			if (crossing_def.is_valid() && !crossing_def->get_blocks_movement()
+					&& crossing_def->get_action_type() == StringName("walk")
+					&& (p_to.elevation - p_from.elevation) <= p_profile->get_max_climb_height()) {
+				out.ok = true;
+				out.action = StringName("walk");
+				out.cost = 1; // v1 flat crossing cost; balance 数值【待定】
+				return out;
+			}
+		}
 		out.reason = StringName("deep_water");
 		return out;
 	}
