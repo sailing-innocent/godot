@@ -12,15 +12,13 @@ class CombatEntity;
 class QueryAPI : public RefCounted {
 	GDCLASS(QueryAPI, RefCounted)
 	Ref<BattleState> state;
+protected:
 	// DEPRECATED (dual-map v1, 2026-10): combat map queries are being
 	// re-pointed at hat_factory_world's HexSpatialQuery (single source of
 	// spatial truth, shared by travel and battle). The signature stays as an
 	// adapter during the migration window; new code must call HexSpatialQuery.
-protected:
 	static void _bind_methods();
 public:
-	static void _bind_methods();
-
 public:
 	QueryAPI() = default;
 	explicit QueryAPI(const Ref<BattleState> &p_state) { state = p_state; }
