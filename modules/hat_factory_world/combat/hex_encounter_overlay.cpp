@@ -196,6 +196,15 @@ Ref<HexCommandResult> HexEncounterOverlay::apply_battle_command(const Ref<HexMap
 	Ref<HexCommandResult> result = HexCommandResolver::apply(overlay, p_command);
 	if (result->accepted) {
 		overlay = result->next_snapshot;
+		// Track touched cells so collect_deltas also covers battle effects
+		// outside the arena (they are committed battle state, not optional).
+		const Array cells = result->get_dirty_cells();
+		for (int i = 0; i < cells.size(); i++) {
+			const Ref<MicroCoord> mc = MicroCoord::from_dict(cells[i]);
+			if (mc.is_valid()) {
+				dirty_micro.insert((((uint64_t)(uint32_t)mc->get_q()) << 32) | (uint32_t)mc->get_r());
+			}
+		}
 	}
 	return result;
 }
@@ -213,8 +222,23 @@ TypedArray<HexMapCommand> HexEncounterOverlay::collect_deltas() const {
 	TypedArray<HexMapCommand> out;
 	ERR_FAIL_COND_V(overlay.is_null() || base_view.is_null(), out);
 	const TypedArray<MicroCoord> cells = get_battle_cells();
+	HashSet<uint64_t> seen;
 	for (int i = 0; i < cells.size(); i++) {
 		const Ref<MicroCoord> coord = cells[i];
+		seen.insert((((uint64_t)(uint32_t)coord->get_q()) << 32) | (uint32_t)coord->get_r());
+		Dictionary after = overlay->get_cell_view(coord);
+		Dictionary before = base_view->get_cell_view(coord);
+		if (!_is_cell_equal(before, after)) {
+			_push_delta_commands(before, after, coord, out);
+		}
+	}
+	// Out-of-arena cells touched by battle commands (regression fix: these
+	// used to be silently dropped from writeback).
+	for (const uint64_t key : dirty_micro) {
+		if (seen.has(key)) {
+			continue;
+		}
+		const Ref<MicroCoord> coord = MicroCoord::make((int32_t)(key >> 32), (int32_t)(uint32_t)key, 1);
 		Dictionary after = overlay->get_cell_view(coord);
 		Dictionary before = base_view->get_cell_view(coord);
 		if (!_is_cell_equal(before, after)) {

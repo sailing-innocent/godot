@@ -16,6 +16,7 @@
 #include "hex_encounter_bounds.h"
 
 #include "core/object/ref_counted.h"
+#include "core/templates/hash_set.h"
 
 class HexCommandResult; // defined in hex_command_resolver.h
 
@@ -28,6 +29,10 @@ public:
 	Dictionary placements; // entity_id (StringName) -> micro coord dict
 	String placement_error;
 	int64_t start_seq = 0;
+	// Cells touched by battle commands (may reach outside the arena, e.g.
+	// collateral damage at a crossing). Unioned with battle cells for delta
+	// collection so writeback never silently drops committed battle effects.
+	HashSet<uint64_t> dirty_micro;
 
 public:
 	/**
@@ -64,8 +69,10 @@ public:
 	Vector3 world_position_of(const Ref<MicroCoord> &p_coord) const;
 
 	/**
-	 * Deltas between overlay and base view for every battle cell, as a list
-	 * of resolver commands ready for writeback.
+	 * Deltas between overlay and base view for every battle cell PLUS every
+	 * cell touched by battle commands (dirty_micro), as resolver commands
+	 * ready for writeback. Skipping out-of-arena dirty cells would silently
+	 * lose battle effects (regression-guarded by test_world_e2e).
 	 */
 	TypedArray<HexMapCommand> collect_deltas() const;
 

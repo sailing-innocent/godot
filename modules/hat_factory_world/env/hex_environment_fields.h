@@ -32,6 +32,9 @@ private:
 	int64_t tick = 0;
 	bool frozen = false;
 	Vector<RuleEvent> pending; // deterministic, replayable
+	// D4 battle injection lives on its own channel: it must never be mixed
+	// with queued rule events (take_battle_event returns THE injected event).
+	RuleEvent battle_event;
 	bool battle_event_pending = false;
 
 public:

@@ -21,6 +21,7 @@ void HexEnvironmentFields::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_frozen", "frozen"), &HexEnvironmentFields::set_frozen);
 	ClassDB::bind_method(D_METHOD("inject_battle_event", "kind", "magnitude"), &HexEnvironmentFields::inject_battle_event);
 	ClassDB::bind_method(D_METHOD("has_battle_event"), &HexEnvironmentFields::has_battle_event);
+	ClassDB::bind_method(D_METHOD("take_battle_event"), &HexEnvironmentFields::take_battle_event);
 	ClassDB::bind_method(D_METHOD("to_dict"), &HexEnvironmentFields::to_dict);
 	ClassDB::bind_static_method("HexEnvironmentFields", D_METHOD("from_dict", "dict"), &HexEnvironmentFields::from_dict);
 }
@@ -94,7 +95,7 @@ bool HexEnvironmentFields::inject_battle_event(const StringName &p_kind, double 
 	ev.tick = tick + 1;
 	ev.kind = p_kind;
 	ev.magnitude = p_magnitude;
-	pending.push_back(ev);
+	battle_event = ev; // separate channel, not the rule queue
 	battle_event_pending = true;
 	return true;
 }
@@ -102,12 +103,11 @@ bool HexEnvironmentFields::inject_battle_event(const StringName &p_kind, double 
 Dictionary HexEnvironmentFields::take_battle_event() {
 	battle_event_pending = false;
 	Dictionary d;
-	if (!pending.is_empty()) {
-		const RuleEvent ev = pending[0];
-		pending.remove_at(0);
-		d[StringName("tick")] = ev.tick;
-		d[StringName("kind")] = ev.kind;
-		d[StringName("magnitude")] = ev.magnitude;
+	if (battle_event.kind != StringName()) {
+		d[StringName("tick")] = battle_event.tick;
+		d[StringName("kind")] = battle_event.kind;
+		d[StringName("magnitude")] = battle_event.magnitude;
+		battle_event = RuleEvent();
 	}
 	return d;
 }

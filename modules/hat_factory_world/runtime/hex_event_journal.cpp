@@ -49,10 +49,14 @@ Ref<HexEventJournal> HexEventJournal::from_dict(const Dictionary &p_dict) {
 	Ref<HexEventJournal> j;
 	j.instantiate();
 	j->next_seq = p_dict.get(StringName("next_seq"), (int64_t)1);
-	// Explicit Array intermediate: direct Variant -> TypedArray<Dictionary>
-	// assignment is ambiguous under clang (Android NDK), though MSVC accepts it.
+	// Build the typed array element-wise: both direct Variant assignment
+	// (clang ambiguity) and untyped Array assignment (runtime element-type
+	// check on typed arrays) fail here; append validates per element.
 	const Array events_arr = p_dict.get(StringName("events"), Array());
-	j->events = events_arr;
+	j->events.clear();
+	for (int i = 0; i < events_arr.size(); i++) {
+		j->events.append(events_arr[i]);
+	}
 	for (int i = 0; i < j->events.size(); i++) {
 		Dictionary ev = j->events[i];
 		const StringName idem = ev.get(StringName("idempotency_id"), StringName());
