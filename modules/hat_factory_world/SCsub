@@ -1,0 +1,15 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_hat_factory_world = env_modules.Clone()
+# Ensure includes resolve relative to the module root (e.g. #include "world/...").
+env_hat_factory_world.Prepend(CPPPATH=[Dir(".")])
+
+# Module sources (later phases add runtime/ query/ combat/ serialization/
+# stream/ env/ legacy/ generation/ subdirs here).
+env_hat_factory_world.add_source_files(env.modules_sources, "*.cpp")
+env_hat_factory_world.add_source_files(env.modules_sources, "world/*.cpp")
+env_hat_factory_world.add_source_files(env.modules_sources, "data/*.cpp")
