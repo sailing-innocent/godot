@@ -16,6 +16,8 @@
 #include "combat/hex_encounter_bounds.h"
 #include "combat/hex_encounter_overlay.h"
 #include "combat/hex_writeback.h"
+#include "env/hex_environment_fields.h"
+#include "legacy/hex_legacy_importer.h"
 #include "query/hex_occupancy.h"
 #include "query/hex_spatial_query.h"
 #include "runtime/hex_command_resolver.h"
@@ -24,6 +26,7 @@
 #include "runtime/hex_region_snapshot.h"
 #include "runtime/hex_world_run.h"
 #include "serialization/hex_world_save.h"
+#include "stream/hex_world_stream_controller.h"
 #include "world/hex_edge_contract.h"
 #include "world/hex_scale_mapping.h"
 #include "world/world_ids.h"
@@ -75,6 +78,11 @@ void initialize_hat_factory_world_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(HexEncounterBounds);
 		GDREGISTER_CLASS(HexEncounterOverlay);
 		GDREGISTER_CLASS(HexWriteback);
+		// Streaming API (sync placeholder) + environment fields (Phase 8).
+		GDREGISTER_CLASS(HexWorldStreamController);
+		GDREGISTER_CLASS(HexEnvironmentFields);
+		// Legacy import (Phase 7).
+		GDREGISTER_CLASS(HexLegacyImporter);
 	}
 }
 
