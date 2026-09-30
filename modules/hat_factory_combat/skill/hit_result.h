@@ -4,6 +4,7 @@
 #include "core/object/ref_counted.h"
 #include "core/string/string_name.h"
 #include "core/string/ustring.h"
+#include "core/math/vector2i.h"
 
 class HitResult : public RefCounted {
 	GDCLASS(HitResult, RefCounted)
@@ -16,6 +17,11 @@ class HitResult : public RefCounted {
 	int status_stacks = 0;
 	int status_turns = 0;
 	String log;
+	Vector2i displacement;
+	bool has_displacement = false;
+	StringName terrain_id;
+	bool has_terrain_change = false;
+	Vector2i terrain_coord;
 
 protected:
 	static void _bind_methods();
@@ -44,6 +50,14 @@ public:
 
 	void set_log(const String &p_value) { log = p_value; }
 	String get_log() const { return log; }
+	void set_displacement(const Vector2i &p_value) { displacement = p_value; has_displacement = true; }
+	Vector2i get_displacement() const { return displacement; }
+	bool get_has_displacement() const { return has_displacement; }
+	void set_terrain_id(const StringName &p_value) { terrain_id = p_value; has_terrain_change = true; }
+	StringName get_terrain_id() const { return terrain_id; }
+	bool get_has_terrain_change() const { return has_terrain_change; }
+	void set_terrain_coord(const Vector2i &p_value) { terrain_coord = p_value; }
+	Vector2i get_terrain_coord() const { return terrain_coord; }
 };
 
 #endif // HIT_RESULT_H

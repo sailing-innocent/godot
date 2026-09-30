@@ -10,9 +10,11 @@
 #include "query/query_api.h"
 #include "skill/skill_cost.h"
 #include "skill/skill_def.h"
+#include "skill/skill_effect.h"
 #include "state/battle_state.h"
 #include "state/combat_entity.h"
 #include "state/rule_set.h"
+#include "modules/hat_factory_hex_grid/hex_grid_map_data.h"
 
 #include "core/object/class_db.h"
 
@@ -125,10 +127,55 @@ Ref<ActionResult> ActionValidator::validate(const Ref<BattleState> &p_state, con
 			if (rules.is_valid()) {
 				def = rules->get_skill_def(skill_id);
 			}
-			if (def.is_valid()) {
+			if (def.is_null()) {
+				result->set_reason("Skill definition unavailable");
+				return result;
+			}
+			TypedArray<SkillEffect> effects = def->get_effects();
+			if (def->get_range() < 0 || def->get_min_range() < 0 || def->get_min_range() > def->get_range() || def->get_aoe_radius() < 0) {
+				result->set_reason("Invalid skill range");
+				return result;
+			}
+			if (effects.size() == 0) {
+				result->set_reason("Skill has no effects");
+				return result;
+			}
+			for (int i = 0; i < effects.size(); i++) {
+				Ref<SkillEffect> effect = effects[i];
+				if (effect.is_null()) {
+					result->set_reason("Missing skill effect");
+					return result;
+				}
+			}
+			{
+				Vector2i target = payload.get("target", transform.is_valid() ? transform->get_coord() : Vector2i());
+				Ref<HexGridMapData> grid = p_state->get_grid_data();
+				if (grid.is_valid() && !grid->has_cell(target)) {
+					result->set_reason("Target cell does not exist");
+					return result;
+				}
+				int target_id = payload.get("target_entity", 0);
+				Ref<CombatEntity> occupant = p_state->get_entity(target_id);
+				Ref<TransformComponent> target_transform;
+				if (occupant.is_valid()) {
+					target_transform = occupant->get_component(StringName("Transform"));
+				}
+				if (def->get_target_type() == 0 && (target_id != actor->get_entity_id() || target != transform->get_coord())) {
+					result->set_reason("Skill must target self");
+					return result;
+				}
+				if (def->get_target_type() != 3 && def->get_target_type() != 0 && def->get_aoe_radius() == 0 &&
+					(target_id == 0 || occupant.is_null() || target_transform.is_null() || target_transform->get_coord() != target ||
+					((def->get_target_type() == 1) != (occupant->get_owner() == actor->get_owner())))) {
+					result->set_reason("Invalid skill target");
+					return result;
+				}
+				if (target_id != 0 && (occupant.is_null() || target_transform.is_null() || target_transform->get_coord() != target)) {
+					result->set_reason("Target entity is not at target cell");
+					return result;
+				}
 				// Range check against the caster's position.
 				if (transform.is_valid()) {
-					Vector2i target = payload.get("target", transform->get_coord());
 					int dist = QueryAPI::hex_distance(transform->get_coord(), target);
 					if (dist > def->get_range() || dist < def->get_min_range()) {
 						result->set_reason("Target out of range");
@@ -138,33 +185,33 @@ Ref<ActionResult> ActionValidator::validate(const Ref<BattleState> &p_state, con
 				// Cost check.
 				Ref<StatsComponent> stats = actor->get_component(StringName("Stats"));
 				TypedArray<SkillCost> costs = def->get_costs();
+				int total_ap = 0;
+				int total_mp = 0;
+				int total_hp = 0;
 				for (int i = 0; i < costs.size(); i++) {
 					Ref<SkillCost> cost = costs[i];
-					if (cost.is_null() || stats.is_null()) {
-						continue;
+					if (cost.is_null() || stats.is_null() || cost->get_amount() < 0) {
+						result->set_reason("Invalid skill cost");
+						return result;
 					}
 					switch (cost->get_cost_type()) {
 						case 0:
-							if (stats->get_ap() < cost->get_amount()) {
-								result->set_reason("Not enough AP");
-								return result;
-							}
+							total_ap += cost->get_amount();
 							break;
 						case 1:
-							if (stats->get_mp() < cost->get_amount()) {
-								result->set_reason("Not enough MP");
-								return result;
-							}
+							total_mp += cost->get_amount();
 							break;
 						case 2:
-							if (stats->get_hp() <= cost->get_amount()) {
-								result->set_reason("Not enough HP");
-								return result;
-							}
+							total_hp += cost->get_amount();
 							break;
 						default:
-							break;
+							result->set_reason("Unsupported skill cost");
+							return result;
 					}
+				}
+				if (stats->get_ap() < total_ap || stats->get_mp() < total_mp || stats->get_hp() <= total_hp) {
+					result->set_reason("Not enough skill resources");
+					return result;
 				}
 			}
 			result->set_accepted(true);

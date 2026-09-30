@@ -5,6 +5,10 @@
 void SkillDef::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_skill_id", "skill_id"), &SkillDef::set_skill_id);
 	ClassDB::bind_method(D_METHOD("get_skill_id"), &SkillDef::get_skill_id);
+	ClassDB::bind_method(D_METHOD("set_theme_id", "theme_id"), &SkillDef::set_theme_id);
+	ClassDB::bind_method(D_METHOD("get_theme_id"), &SkillDef::get_theme_id);
+	ClassDB::bind_method(D_METHOD("set_definition_version", "definition_version"), &SkillDef::set_definition_version);
+	ClassDB::bind_method(D_METHOD("get_definition_version"), &SkillDef::get_definition_version);
 	ClassDB::bind_method(D_METHOD("set_display_name", "display_name"), &SkillDef::set_display_name);
 	ClassDB::bind_method(D_METHOD("get_display_name"), &SkillDef::get_display_name);
 	ClassDB::bind_method(D_METHOD("set_description", "description"), &SkillDef::set_description);
@@ -31,6 +35,8 @@ void SkillDef::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_requires_los"), &SkillDef::get_requires_los);
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "skill_id"), "set_skill_id", "get_skill_id");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "theme_id"), "set_theme_id", "get_theme_id");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "definition_version"), "set_definition_version", "get_definition_version");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "display_name"), "set_display_name", "get_display_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "description"), "set_description", "get_description");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "target_type"), "set_target_type", "get_target_type");

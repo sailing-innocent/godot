@@ -6,6 +6,7 @@
 #include "components/combat_attr_component.h"
 #include "core/math/expression.h"
 #include "core/object/class_db.h"
+#include "core/io/resource_loader.h"
 #include "core/variant/typed_array.h"
 
 void RuleSet::_bind_methods() {
@@ -176,6 +177,18 @@ Dictionary RuleSet::to_dict() const {
 	d["energy_recovery_water"] = energy_recovery_water;
 	d["energy_recovery_highland"] = energy_recovery_highland;
 	d["highland_min_height"] = highland_min_height;
+	Dictionary paths;
+	Dictionary versions;
+	Array ids = skill_library.keys();
+	for (int i = 0; i < ids.size(); i++) {
+		Ref<SkillDef> def = skill_library[ids[i]];
+		if (def.is_valid() && !def->get_path().is_empty()) {
+			paths[ids[i]] = def->get_path();
+			versions[ids[i]] = def->get_definition_version();
+		}
+	}
+	d["skill_paths"] = paths;
+	d["skill_versions"] = versions;
 	return d;
 }
 
@@ -196,6 +209,19 @@ Ref<RuleSet> RuleSet::from_dict(const Dictionary &p_dict) {
 	if (p_dict.has("energy_recovery_water")) rs->energy_recovery_water = p_dict["energy_recovery_water"];
 	if (p_dict.has("energy_recovery_highland")) rs->energy_recovery_highland = p_dict["energy_recovery_highland"];
 	if (p_dict.has("highland_min_height")) rs->highland_min_height = p_dict["highland_min_height"];
+	if (p_dict.has("skill_paths")) {
+		Dictionary paths = p_dict["skill_paths"];
+		Dictionary versions = p_dict.get("skill_versions", Dictionary());
+		Array ids = paths.keys();
+		for (int i = 0; i < ids.size(); i++) {
+			StringName id = ids[i];
+			Ref<SkillDef> def = ResourceLoader::load(paths[id]);
+			if (def.is_valid() && def->get_skill_id() == id &&
+				(!versions.has(id) || def->get_definition_version() == int(versions[id]))) {
+				rs->register_skill(id, def);
+			}
+		}
+	}
 	return rs;
 }
 

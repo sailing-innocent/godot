@@ -14,6 +14,8 @@ class SkillDef : public Resource {
 	GDCLASS(SkillDef, Resource)
 
 	StringName skill_id;
+	StringName theme_id;
+	int definition_version = 1;
 	String display_name;
 	String description;
 	int target_type = 0;
@@ -33,6 +35,10 @@ protected:
 public:
 	void set_skill_id(const StringName &p_value) { skill_id = p_value; }
 	StringName get_skill_id() const { return skill_id; }
+	void set_theme_id(const StringName &p_value) { theme_id = p_value; }
+	StringName get_theme_id() const { return theme_id; }
+	void set_definition_version(int p_value) { definition_version = p_value; }
+	int get_definition_version() const { return definition_version; }
 
 	void set_display_name(const String &p_value) { display_name = p_value; }
 	String get_display_name() const { return display_name; }

@@ -47,6 +47,7 @@ void GameEvent::_bind_methods() {
 	BIND_ENUM_CONSTANT(ACTION_REJECTED);
 	BIND_ENUM_CONSTANT(BATTLE_ENDED);
 	BIND_ENUM_CONSTANT(ITEM_USED);
+	BIND_ENUM_CONSTANT(TERRAIN_CHANGED);
 }
 
 Ref<GameEvent> GameEvent::turn_started(int p_actor) {

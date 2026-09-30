@@ -3,6 +3,17 @@
 #include "core/object/class_db.h"
 
 void HitResult::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_displacement", "coord"), &HitResult::set_displacement);
+	ClassDB::bind_method(D_METHOD("get_displacement"), &HitResult::get_displacement);
+	ClassDB::bind_method(D_METHOD("get_has_displacement"), &HitResult::get_has_displacement);
+	ClassDB::bind_method(D_METHOD("set_terrain_id", "terrain_id"), &HitResult::set_terrain_id);
+	ClassDB::bind_method(D_METHOD("get_terrain_id"), &HitResult::get_terrain_id);
+	ClassDB::bind_method(D_METHOD("get_has_terrain_change"), &HitResult::get_has_terrain_change);
+	ClassDB::bind_method(D_METHOD("set_terrain_coord", "coord"), &HitResult::set_terrain_coord);
+	ClassDB::bind_method(D_METHOD("get_terrain_coord"), &HitResult::get_terrain_coord);
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "displacement"), "set_displacement", "get_displacement");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "terrain_id"), "set_terrain_id", "get_terrain_id");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "terrain_coord"), "set_terrain_coord", "get_terrain_coord");
 	ClassDB::bind_method(D_METHOD("set_target_id", "target_id"), &HitResult::set_target_id);
 	ClassDB::bind_method(D_METHOD("get_target_id"), &HitResult::get_target_id);
 	ClassDB::bind_method(D_METHOD("set_damage", "damage"), &HitResult::set_damage);

@@ -147,6 +147,7 @@ TypedArray<BattleAction> BattleEngine::get_legal_actions(const Ref<BattleState> 
 	query->set_state(p_state);
 
 	Ref<TransformComponent> transform = entity->get_component(StringName("Transform"));
+	ActionValidator validator;
 
 	// Move actions: one per reachable cell (excluding the current cell).
 	if (!moved && transform.is_valid()) {
@@ -208,7 +209,10 @@ TypedArray<BattleAction> BattleEngine::get_legal_actions(const Ref<BattleState> 
 					if (dist > def->get_range() || dist < def->get_min_range()) {
 						continue;
 					}
-					actions.push_back(BattleAction::skill(p_actor_id, skill_id, tt->get_coord(), target->get_entity_id()));
+					Ref<BattleAction> candidate = BattleAction::skill(p_actor_id, skill_id, tt->get_coord(), target->get_entity_id());
+					if (validator.validate_skill(p_state, candidate)->get_accepted()) {
+						actions.push_back(candidate);
+					}
 				}
 			}
 		}
