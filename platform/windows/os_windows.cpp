@@ -31,6 +31,9 @@
 #include "os_windows.h"
 
 #include "display_server_windows.h"
+#if defined(RD_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+#include "display_server_dsh.h"
+#endif
 #include "lang_table.h"
 #include "windows_terminal_logger.h"
 #include "windows_utils.h"
@@ -49,6 +52,7 @@
 #include "drivers/windows/net_socket_winsock.h"
 #include "drivers/windows/thread_windows.h"
 #include "main/main.h"
+#include "main/dsh_viewport_mode.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/text/text_server.h"
 
@@ -247,6 +251,15 @@ BOOL WINAPI HandlerRoutine(_In_ DWORD dwCtrlType) {
 }
 
 void OS_Windows::alert(const String &p_alert, const String &p_title) {
+#ifdef DSH_VIEWPORT_ENABLED
+	if (DSHViewportMode::worker_enabled) {
+		// A native message box would hang the hidden worker process; the
+		// DSH broker surfaces stderr as diagnostics instead.
+		fprintf(stderr, "Godot alert (%s): %s\n", p_title.utf8().get_data(), p_alert.utf8().get_data());
+		fflush(stderr);
+		return;
+	}
+#endif
 	MessageBoxW(nullptr, (LPCWSTR)(p_alert.utf16().get_data()), (LPCWSTR)(p_title.utf16().get_data()), MB_OK | MB_ICONEXCLAMATION | MB_TASKMODAL);
 }
 
@@ -2946,6 +2959,9 @@ OS_Windows::OS_Windows(HINSTANCE _hInstance) {
 #endif
 
 	DisplayServerWindows::register_windows_driver();
+#if defined(RD_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+	DisplayServerDSH::register_dsh_driver();
+#endif
 
 	// Enable ANSI escape code support on Windows 10 v1607 (Anniversary Update) and later.
 	// This lets the engine and projects use ANSI escape codes to color text just like on macOS and Linux.

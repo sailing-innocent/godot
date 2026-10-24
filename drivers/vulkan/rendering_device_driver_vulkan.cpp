@@ -602,6 +602,12 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	// can and will fill the validation layers with useless info otherwise if not enabled.
 	_register_requested_device_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, false);
 
+#if defined(DSH_VIEWPORT_ENABLED)
+	// Required to import the D3D11 shared textures used by the DSH viewport worker.
+	_register_requested_device_extension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, true);
+	_register_requested_device_extension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, true);
+#endif
+
 	if (Engine::get_singleton()->is_generate_spirv_debug_info_enabled()) {
 		_register_requested_device_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME, true);
 	}
@@ -1433,6 +1439,15 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		device_fault_features.pNext = create_info_next;
 		create_info_next = &device_fault_features;
 	}
+
+#if defined(DSH_VIEWPORT_ENABLED)
+	// DSH viewport frame completion is tracked through a timeline semaphore.
+	VkPhysicalDeviceTimelineSemaphoreFeatures dsh_timeline_semaphore_features = {};
+	dsh_timeline_semaphore_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+	dsh_timeline_semaphore_features.pNext = create_info_next;
+	dsh_timeline_semaphore_features.timelineSemaphore = VK_TRUE;
+	create_info_next = &dsh_timeline_semaphore_features;
+#endif
 
 #if defined(VK_TRACK_DEVICE_MEMORY)
 	VkDeviceDeviceMemoryReportCreateInfoEXT memory_report_info = {};
@@ -3308,10 +3323,49 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			const SwapChain *swap_chain = (const SwapChain *)(p_swap_chains[i].id);
+#if defined(DSH_VIEWPORT_ENABLED)
+			RenderingContextDriverVulkan::Surface *dsh_surface = (RenderingContextDriverVulkan::Surface *)(swap_chain->surface);
+			if (dsh_surface->dsh_headless) {
+				// DSH frames don't queue-present; completion is signaled on the
+				// sink's timeline semaphore appended below.
+				continue;
+			}
+#endif
 			VkSemaphore semaphore = swap_chain->present_semaphores[swap_chain->image_index];
 			present_semaphores.push_back(semaphore);
 			signal_semaphores.push_back(semaphore);
 		}
+
+#if defined(DSH_VIEWPORT_ENABLED)
+		// Append the timeline semaphore signals used to observe DSH frame completion.
+		thread_local LocalVector<uint64_t> dsh_present_values;
+		thread_local LocalVector<DSHViewportFrameSinkVulkan *> dsh_present_sinks;
+		dsh_present_values.clear();
+		dsh_present_sinks.clear();
+		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
+			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+			RenderingContextDriverVulkan::Surface *dsh_surface = (RenderingContextDriverVulkan::Surface *)(swap_chain->surface);
+			if (dsh_surface->dsh_headless) {
+				DSHViewportFrameSinkVulkan *sink = dsh_surface->dsh_sink;
+				dsh_present_sinks.push_back(sink);
+				dsh_present_values.push_back(sink->allocate_present(swap_chain->image_index));
+				signal_semaphores.push_back(sink->get_completion_semaphore());
+			}
+		}
+
+		VkTimelineSemaphoreSubmitInfo dsh_timeline_submit_info = {};
+		thread_local LocalVector<uint64_t> dsh_signal_semaphore_values;
+		dsh_signal_semaphore_values.clear();
+		if (!dsh_present_values.is_empty()) {
+			uint32_t binary_semaphore_count = signal_semaphores.size() - dsh_present_values.size();
+			for (uint32_t i = 0; i < signal_semaphores.size(); i++) {
+				dsh_signal_semaphore_values.push_back(i < binary_semaphore_count ? 0 : dsh_present_values[i - binary_semaphore_count]);
+			}
+			dsh_timeline_submit_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+			dsh_timeline_submit_info.signalSemaphoreValueCount = dsh_signal_semaphore_values.size();
+			dsh_timeline_submit_info.pSignalSemaphoreValues = dsh_signal_semaphore_values.ptr();
+		}
+#endif
 
 		VkSubmitInfo submit_info = {};
 		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3322,10 +3376,25 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		submit_info.pCommandBuffers = command_buffers.ptr();
 		submit_info.signalSemaphoreCount = signal_semaphores.size();
 		submit_info.pSignalSemaphores = signal_semaphores.ptr();
+#if defined(DSH_VIEWPORT_ENABLED)
+		if (!dsh_present_values.is_empty()) {
+			submit_info.pNext = &dsh_timeline_submit_info;
+		}
+#endif
 
 		device_queue.submit_mutex.lock();
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
 		device_queue.submit_mutex.unlock();
+
+#if defined(DSH_VIEWPORT_ENABLED)
+		if (err != VK_SUCCESS) {
+			// The submit never happened; undo the pending presents so the
+			// sink doesn't wait for values that will never be signaled.
+			for (uint32_t i = 0; i < dsh_present_values.size(); i++) {
+				dsh_present_sinks[i]->cancel_present(dsh_present_values[i]);
+			}
+		}
+#endif
 
 		if (err == VK_ERROR_DEVICE_LOST) {
 			print_lost_device_info();
@@ -3359,68 +3428,85 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+#if defined(DSH_VIEWPORT_ENABLED)
+			RenderingContextDriverVulkan::Surface *dsh_surface = (RenderingContextDriverVulkan::Surface *)(swap_chain->surface);
+			if (dsh_surface->dsh_headless) {
+				// The DSH protocol replaces the presentation engine; the frame
+				// was already handed to the broker by the sink.
+				swap_chain->image_index = UINT_MAX;
+				continue;
+			}
+#endif
 			swapchains.push_back(swap_chain->vk_swapchain);
 			DEV_ASSERT(swap_chain->image_index < swap_chain->images.size());
 			image_indices.push_back(swap_chain->image_index);
 		}
 
-		results.resize(swapchains.size());
+		if (!swapchains.is_empty()) {
+			results.resize(swapchains.size());
 
-		VkPresentInfoKHR present_info = {};
-		present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-		present_info.waitSemaphoreCount = wait_semaphores.size();
-		present_info.pWaitSemaphores = wait_semaphores.ptr();
-		present_info.swapchainCount = swapchains.size();
-		present_info.pSwapchains = swapchains.ptr();
-		present_info.pImageIndices = image_indices.ptr();
-		present_info.pResults = results.ptr();
+			VkPresentInfoKHR present_info = {};
+			present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+			present_info.waitSemaphoreCount = wait_semaphores.size();
+			present_info.pWaitSemaphores = wait_semaphores.ptr();
+			present_info.swapchainCount = swapchains.size();
+			present_info.pSwapchains = swapchains.ptr();
+			present_info.pImageIndices = image_indices.ptr();
+			present_info.pResults = results.ptr();
 
-		device_queue.submit_mutex.lock();
+			device_queue.submit_mutex.lock();
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
-		if (swappy_frame_pacer_enable) {
-			err = SwappyVk_queuePresent(device_queue.queue, &present_info);
-		} else {
-			err = device_functions.QueuePresentKHR(device_queue.queue, &present_info);
-		}
+			if (swappy_frame_pacer_enable) {
+				err = SwappyVk_queuePresent(device_queue.queue, &present_info);
+			} else {
+				err = device_functions.QueuePresentKHR(device_queue.queue, &present_info);
+			}
 #else
-		err = device_functions.QueuePresentKHR(device_queue.queue, &present_info);
+			err = device_functions.QueuePresentKHR(device_queue.queue, &present_info);
 #endif
 
-		device_queue.submit_mutex.unlock();
+			device_queue.submit_mutex.unlock();
 
-		// Set the index to an invalid value. If any of the swap chains returned out of date, indicate it should be resized the next time it's acquired.
-		bool any_result_is_out_of_date = false;
-		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
-			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
-			swap_chain->image_index = UINT_MAX;
-			if (results[i] == VK_ERROR_OUT_OF_DATE_KHR) {
-				context_driver->surface_set_needs_resize(swap_chain->surface, true);
-				any_result_is_out_of_date = true;
+			// Set the index to an invalid value. If any of the swap chains returned out of date, indicate it should be resized the next time it's acquired.
+			bool any_result_is_out_of_date = false;
+			for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
+				SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+				swap_chain->image_index = UINT_MAX;
+				if (results[i] == VK_ERROR_OUT_OF_DATE_KHR) {
+					context_driver->surface_set_needs_resize(swap_chain->surface, true);
+					any_result_is_out_of_date = true;
+				}
+			}
+
+			if (any_result_is_out_of_date || err == VK_ERROR_OUT_OF_DATE_KHR) {
+				// It is possible for presentation to fail with out of date while acquire might've succeeded previously. This case
+				// will be considered a silent failure as it can be triggered easily by resizing a window in the OS natively.
+				return FAILED;
+			}
+
+			// Handling VK_SUBOPTIMAL_KHR the same as VK_SUCCESS is completely intentional.
+			//
+			// Godot does not currently support native rotation in Android when creating the swap chain. It intentionally uses
+			// VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR instead of the current transform bits available in the surface capabilities.
+			// Choosing the transform that leads to optimal presentation leads to distortion that makes the application unusable at
+			// the moment.
+			//
+			// VK_SUBOPTIMAL_KHR is accepted as a successful case even if it's not the most efficient solution to work around that
+			// problem. This behavior should not be changed unless the swap chain recreation uses the current transform bits, as
+			// it'll lead to very low performance in Android by entering an endless loop where it'll always resize the swap chain
+			// every frame.
+
+			ERR_FAIL_COND_V_MSG(
+					err != VK_SUCCESS && err != VK_SUBOPTIMAL_KHR,
+					FAILED,
+					"Couldn't present to Vulkan queue (VkResult error " + get_vulkan_result(err) + ").");
+		} else {
+			// All swap chains were DSH headless; nothing to present on the queue.
+			for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
+				SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+				swap_chain->image_index = UINT_MAX;
 			}
 		}
-
-		if (any_result_is_out_of_date || err == VK_ERROR_OUT_OF_DATE_KHR) {
-			// It is possible for presentation to fail with out of date while acquire might've succeeded previously. This case
-			// will be considered a silent failure as it can be triggered easily by resizing a window in the OS natively.
-			return FAILED;
-		}
-
-		// Handling VK_SUBOPTIMAL_KHR the same as VK_SUCCESS is completely intentional.
-		//
-		// Godot does not currently support native rotation in Android when creating the swap chain. It intentionally uses
-		// VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR instead of the current transform bits available in the surface capabilities.
-		// Choosing the transform that leads to optimal presentation leads to distortion that makes the application unusable,
-		// as the rotation of all the content is not handled at the moment.
-		//
-		// VK_SUBOPTIMAL_KHR is accepted as a successful case even if it's not the most efficient solution to work around this
-		// problem. This behavior should not be changed unless the swap chain recreation uses the current transform bits, as
-		// it'll lead to very low performance in Android by entering an endless loop where it'll always resize the swap chain
-		// every frame.
-
-		ERR_FAIL_COND_V_MSG(
-				err != VK_SUCCESS && err != VK_SUBOPTIMAL_KHR,
-				FAILED,
-				"Couldn't present to Vulkan queue (VkResult error " + get_vulkan_result(err) + ").");
 	}
 
 	return OK;
@@ -3742,6 +3828,13 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	// Release all current contents of the swap chain.
 	_swap_chain_release(swap_chain);
 
+#if defined(DSH_VIEWPORT_ENABLED)
+	RenderingContextDriverVulkan::Surface *dsh_surface = (RenderingContextDriverVulkan::Surface *)(swap_chain->surface);
+	if (dsh_surface->dsh_headless) {
+		return _swap_chain_resize_dsh(command_queue, swap_chain, dsh_surface, p_desired_framebuffer_count);
+	}
+#endif
+
 	// Validate if the command queue being used supports creating the swap chain for this surface.
 	const RenderingContextDriverVulkan::Functions &functions = context_driver->functions_get();
 	if (!context_driver->queue_family_supports_present(physical_device, command_queue->queue_family, swap_chain->surface)) {
@@ -4049,12 +4142,144 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	return OK;
 }
 
+#if defined(DSH_VIEWPORT_ENABLED)
+Error RenderingDeviceDriverVulkan::_swap_chain_resize_dsh(CommandQueue *p_command_queue, SwapChain *p_swap_chain, RenderingContextDriverVulkan::Surface *p_surface, uint32_t p_desired_framebuffer_count) {
+	DSHViewportFrameSinkVulkan *sink = p_surface->dsh_sink;
+	ERR_FAIL_COND_V(sink == nullptr, ERR_CANT_CREATE);
+
+	if (p_surface->width == 0 || p_surface->height == 0) {
+		// No valid dimensions yet (surface suspended); same as a minimized window.
+		return ERR_SKIP;
+	}
+
+	uint32_t slot_count = CLAMP(p_desired_framebuffer_count, 2U, DSHViewportFrameSinkVulkan::MAX_SLOTS);
+	Error err = sink->create_frames(physical_device, vk_device, p_command_queue->queue_family, p_surface->width, p_surface->height, slot_count);
+	ERR_FAIL_COND_V_MSG(err != OK, err, "DSH viewport: couldn't create the shared frame pool.");
+
+	p_swap_chain->format = VK_FORMAT_R8G8B8A8_UNORM;
+	p_swap_chain->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	p_swap_chain->rdd_color_space = COLOR_SPACE_REC709_NONLINEAR_SRGB;
+
+	p_swap_chain->images.resize(slot_count);
+	for (uint32_t i = 0; i < slot_count; i++) {
+		p_swap_chain->images[i] = sink->get_slot_image(i);
+	}
+
+	VkImageViewCreateInfo view_create_info = {};
+	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_create_info.format = p_swap_chain->format;
+	view_create_info.components.r = VK_COMPONENT_SWIZZLE_R;
+	view_create_info.components.g = VK_COMPONENT_SWIZZLE_G;
+	view_create_info.components.b = VK_COMPONENT_SWIZZLE_B;
+	view_create_info.components.a = VK_COMPONENT_SWIZZLE_A;
+	view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	view_create_info.subresourceRange.levelCount = 1;
+	view_create_info.subresourceRange.layerCount = 1;
+
+	VkImageView image_view;
+	for (uint32_t i = 0; i < slot_count; i++) {
+		view_create_info.image = p_swap_chain->images[i];
+		VkResult vk_err = vkCreateImageView(vk_device, &view_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW), &image_view);
+		ERR_FAIL_COND_V_MSG(vk_err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan image view for DSH viewport frame (VkResult error %d).", vk_err));
+		p_swap_chain->image_views.push_back(image_view);
+	}
+
+	// Same single-attachment pass as regular swapchains: the blit targets the
+	// imported image and leaves it in PRESENT_SRC for the D3D11 consumer.
+	VkAttachmentDescription2KHR attachment = {};
+	attachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2_KHR;
+	attachment.format = p_swap_chain->format;
+	attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	VkAttachmentReference2KHR color_reference = {};
+	color_reference.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2_KHR;
+	color_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription2KHR subpass = {};
+	subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2_KHR;
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &color_reference;
+
+	VkRenderPassCreateInfo2KHR pass_info = {};
+	pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2_KHR;
+	pass_info.attachmentCount = 1;
+	pass_info.pAttachments = &attachment;
+	pass_info.subpassCount = 1;
+	pass_info.pSubpasses = &subpass;
+
+	VkRenderPass vk_render_pass = VK_NULL_HANDLE;
+	VkResult vk_err = _create_render_pass(vk_device, &pass_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_RENDER_PASS), &vk_render_pass);
+	ERR_FAIL_COND_V_MSG(vk_err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan render pass for DSH viewport (VkResult error %d).", vk_err));
+
+	RenderPassInfo *render_pass_info = VersatileResource::allocate<RenderPassInfo>(resources_allocator);
+	render_pass_info->vk_render_pass = vk_render_pass;
+	p_swap_chain->render_pass = RenderPassID(render_pass_info);
+
+	VkFramebufferCreateInfo fb_create_info = {};
+	fb_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fb_create_info.renderPass = vk_render_pass;
+	fb_create_info.attachmentCount = 1;
+	fb_create_info.width = p_surface->width;
+	fb_create_info.height = p_surface->height;
+	fb_create_info.layers = 1;
+
+	VkFramebuffer vk_framebuffer;
+	for (uint32_t i = 0; i < slot_count; i++) {
+		fb_create_info.pAttachments = &p_swap_chain->image_views[i];
+		vk_err = vkCreateFramebuffer(vk_device, &fb_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FRAMEBUFFER), &vk_framebuffer);
+		ERR_FAIL_COND_V_MSG(vk_err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan framebuffer for DSH viewport frame (VkResult error %d).", vk_err));
+
+		Framebuffer *framebuffer = memnew(Framebuffer);
+		framebuffer->vk_framebuffer = vk_framebuffer;
+		framebuffer->swap_chain_image = p_swap_chain->images[i];
+		framebuffer->swap_chain_image_subresource_range = view_create_info.subresourceRange;
+		p_swap_chain->framebuffers.push_back(RDD::FramebufferID(framebuffer));
+	}
+
+	// No binary present semaphores are needed: the frame sink tracks
+	// completion with its own timeline semaphore.
+
+	context_driver->surface_set_needs_resize(p_swap_chain->surface, false);
+	return OK;
+}
+#endif // DSH_VIEWPORT_ENABLED
+
 RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) {
 	DEV_ASSERT(p_cmd_queue);
 	DEV_ASSERT(p_swap_chain);
 
 	CommandQueue *command_queue = (CommandQueue *)(p_cmd_queue.id);
 	SwapChain *swap_chain = (SwapChain *)(p_swap_chain.id);
+
+#if defined(DSH_VIEWPORT_ENABLED)
+	{
+		RenderingContextDriverVulkan::Surface *dsh_surface = (RenderingContextDriverVulkan::Surface *)(swap_chain->surface);
+		if (dsh_surface->dsh_headless) {
+			DSHViewportFrameSinkVulkan *sink = dsh_surface->dsh_sink;
+			if (context_driver->surface_get_needs_resize(swap_chain->surface) || !sink->has_frames()) {
+				r_resize_required = true;
+				return FramebufferID();
+			}
+			uint32_t slot = sink->acquire_slot_blocking();
+			ERR_FAIL_COND_V_MSG(slot == UINT32_MAX || slot >= swap_chain->images.size(), FramebufferID(),
+					"DSH viewport: frame lease timeout; the broker did not release a frame slot.");
+			swap_chain->image_index = slot;
+			FramebufferID framebuffer_id = swap_chain->framebuffers[slot];
+			Framebuffer *framebuffer = (Framebuffer *)(framebuffer_id.id);
+			framebuffer->swap_chain_acquired = true;
+			return framebuffer_id;
+		}
+	}
+#endif
+
 	if ((swap_chain->vk_swapchain == VK_NULL_HANDLE) || context_driver->surface_get_needs_resize(swap_chain->surface)) {
 		// The surface does not have a valid swap chain or it indicates it requires a resize.
 		r_resize_required = true;

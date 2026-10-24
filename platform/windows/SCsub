@@ -15,6 +15,9 @@ sources = []
 common_win = [
     "os_windows.cpp",
     "display_server_windows.cpp",
+    "display_server_dsh.cpp",
+    "dsh_viewport_worker.cpp",
+    "dsh_shared_frames_win32.cpp",
     "key_mapping_windows.cpp",
     "windows_terminal_logger.cpp",
     "windows_utils.cpp",

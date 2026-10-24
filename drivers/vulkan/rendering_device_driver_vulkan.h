@@ -150,6 +150,14 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	HashMap<CharString, bool> requested_device_extensions;
 	HashSet<CharString> enabled_device_extension_names;
 	TightLocalVector<TightLocalVector<Queue>> queue_families;
+public:
+#if defined(DSH_VIEWPORT_ENABLED)
+	// Physical device this driver instance renders on; used by the DSH
+	// viewport worker to match the DXGI adapter and report adapter IDs.
+	VkPhysicalDevice get_vulkan_physical_device() const { return physical_device; }
+#endif
+
+private:
 	TightLocalVector<VkQueueFamilyProperties> queue_family_properties;
 	RDD::Capabilities device_capabilities;
 	SubgroupCapabilities subgroup_capabilities;
@@ -446,7 +454,11 @@ private:
 
 	bool _determine_swap_chain_format(RenderingContextDriver::SurfaceID p_surface, VkFormat &r_format, VkColorSpaceKHR &r_color_space, RDD::ColorSpace &r_rdd_color_space);
 	void _swap_chain_release(SwapChain *p_swap_chain);
-
+#if defined(DSH_VIEWPORT_ENABLED)
+	// Headless DSH viewport swapchain variant backed by the frame sink.
+	Error _swap_chain_resize_dsh(CommandQueue *p_command_queue, SwapChain *p_swap_chain, RenderingContextDriverVulkan::Surface *p_surface, uint32_t p_desired_framebuffer_count);
+#endif
+public:
 public:
 	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override final;
 	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override final;

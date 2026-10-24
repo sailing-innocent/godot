@@ -963,6 +963,17 @@ RenderingContextDriver::SurfaceID RenderingContextDriverVulkan::surface_create(c
 	return SurfaceID();
 }
 
+#if defined(DSH_VIEWPORT_ENABLED)
+RenderingContextDriver::SurfaceID RenderingContextDriverVulkan::surface_create_dsh(DSHViewportFrameSinkVulkan *p_sink) {
+	ERR_FAIL_COND_V(p_sink == nullptr, SurfaceID());
+	Surface *surface = memnew(Surface);
+	surface->vk_surface = VK_NULL_HANDLE;
+	surface->dsh_headless = true;
+	surface->dsh_sink = p_sink;
+	return SurfaceID(surface);
+}
+#endif
+
 void RenderingContextDriverVulkan::surface_set_size(SurfaceID p_surface, uint32_t p_width, uint32_t p_height) {
 	Surface *surface = (Surface *)(p_surface);
 	surface->width = p_width;
@@ -1049,7 +1060,13 @@ bool RenderingContextDriverVulkan::surface_get_needs_resize(SurfaceID p_surface)
 
 void RenderingContextDriverVulkan::surface_destroy(SurfaceID p_surface) {
 	Surface *surface = (Surface *)(p_surface);
+#if defined(DSH_VIEWPORT_ENABLED)
+	if (!surface->dsh_headless) {
+		vkDestroySurfaceKHR(instance, surface->vk_surface, get_allocation_callbacks(VK_OBJECT_TYPE_SURFACE_KHR));
+	}
+#else
 	vkDestroySurfaceKHR(instance, surface->vk_surface, get_allocation_callbacks(VK_OBJECT_TYPE_SURFACE_KHR));
+#endif
 	memdelete(surface);
 }
 
@@ -1085,6 +1102,13 @@ bool RenderingContextDriverVulkan::queue_family_supports_present(VkPhysicalDevic
 	DEV_ASSERT(p_physical_device != VK_NULL_HANDLE);
 	DEV_ASSERT(p_surface != 0);
 	Surface *surface = (Surface *)(p_surface);
+#if defined(DSH_VIEWPORT_ENABLED)
+	if (surface->dsh_headless) {
+		// Headless DSH surfaces have no presentation engine; the graphics
+		// queue both renders and drives the frame sink.
+		return (surface->dsh_sink != nullptr);
+	}
+#endif
 	VkBool32 present_supported = false;
 	VkResult err = vkGetPhysicalDeviceSurfaceSupportKHR(p_physical_device, p_queue_family_index, surface->vk_surface, &present_supported);
 	return err == VK_SUCCESS && present_supported;

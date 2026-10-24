@@ -30,6 +30,8 @@
 
 #include "main.h"
 
+#include "dsh_viewport_mode.h"
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/core_globals.h"
@@ -1466,6 +1468,26 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 			audio_driver = NULL_AUDIO_DRIVER;
 			display_driver = NULL_DISPLAY_DRIVER;
 
+		} else if (arg == "--dsh-viewport-protocol") { // DSH native viewport worker transport (reserved, appended by the DSH broker).
+			if (N) {
+				if (N->get() != "2") {
+					OS::get_singleton()->print("Unsupported DSH viewport protocol version, aborting.\n");
+					goto error;
+				}
+				DSHViewportMode::worker_enabled = true;
+				N = N->next();
+			} else {
+				OS::get_singleton()->print("Missing DSH viewport protocol version argument, aborting.\n");
+				goto error;
+			}
+		} else if (arg == "--broker-pid") { // DSH broker process ID for the NT handle export (reserved).
+			if (N) {
+				DSHViewportMode::broker_pid = (uint32_t)N->get().to_int();
+				N = N->next();
+			} else {
+				OS::get_singleton()->print("Missing DSH broker PID argument, aborting.\n");
+				goto error;
+			}
 		} else if (arg == "--embedded") { // Enable embedded mode.
 #ifdef MACOS_ENABLED
 			display_driver = EMBEDDED_DISPLAY_DRIVER;
@@ -2094,26 +2116,28 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #ifdef TOOLS_ENABLED
 		editor = false;
 #else
-		String error_msg = "Error: Couldn't load project data at path \"" + (project_path == "." ? OS::get_singleton()->get_cwd() : project_path) + "\". Is the .pck file missing?\n\n";
+		if (!DSHViewportMode::worker_enabled) {
+			String error_msg = "Error: Couldn't load project data at path \"" + (project_path == "." ? OS::get_singleton()->get_cwd() : project_path) + "\". Is the .pck file missing?\n\n";
 #if !defined(OVERRIDE_PATH_ENABLED) && !defined(TOOLS_ENABLED)
-		String exec_path = OS::get_singleton()->get_executable_path();
-		String exec_basename = exec_path.get_file().get_basename();
+			String exec_path = OS::get_singleton()->get_executable_path();
+			String exec_basename = exec_path.get_file().get_basename();
 
-		if (FileAccess::exists(old_cwd.path_join(exec_basename + ".pck"))) {
-			error_msg += "\"" + exec_basename + ".pck\" was found in the current working directory. To be able to load a project from the CWD, use the `disable_path_overrides=no` SCons option when compiling Godot.\n";
-		} else if (FileAccess::exists(old_cwd.path_join("project.godot"))) {
-			error_msg += "\"project.godot\" was found in the current working directory. To be able to load a project from the CWD, use the `disable_path_overrides=no` SCons option when compiling Godot.\n";
-		} else {
-			error_msg += "If you've renamed the executable, the associated .pck file should also be renamed to match the executable's name (without the extension).\n";
-		}
+			if (FileAccess::exists(old_cwd.path_join(exec_basename + ".pck"))) {
+				error_msg += "\"" + exec_basename + ".pck\" was found in the current working directory. To be able to load a project from the CWD, use the `disable_path_overrides=no` SCons option when compiling Godot.\n";
+			} else if (FileAccess::exists(old_cwd.path_join("project.godot"))) {
+				error_msg += "\"project.godot\" was found in the current working directory. To be able to load a project from the CWD, use the `disable_path_overrides=no` SCons option when compiling Godot.\n";
+			} else {
+				error_msg += "If you've renamed the executable, the associated .pck file should also be renamed to match the executable's name (without the extension).\n";
+			}
 #else
-		error_msg += "If you've renamed the executable, the associated .pck file should also be renamed to match the executable's name (without the extension).\n";
+			error_msg += "If you've renamed the executable, the associated .pck file should also be renamed to match the executable's name (without the extension).\n";
 #endif
-		ERR_PRINT(error_msg);
+			ERR_PRINT(error_msg);
 
-		OS::get_singleton()->alert(error_msg);
+			OS::get_singleton()->alert(error_msg);
 
-		goto error;
+			goto error;
+		}
 #endif
 	}
 
@@ -2140,7 +2164,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	}
 
 #ifdef TOOLS_ENABLED
-	if (!project_manager && !editor) {
+	if (!DSHViewportMode::worker_enabled && !project_manager && !editor) {
 		// If we didn't find a project, we fall back to the project manager.
 		project_manager = !found_project && !cmdline_tool;
 	}
@@ -2338,7 +2362,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		OS::get_singleton()->add_logger(memnew(RotatedFileLogger(base_path, max_files)));
 	}
 
-	if (main_args.is_empty() && String(GLOBAL_GET("application/run/main_scene")) == "") {
+	if (main_args.is_empty() && String(GLOBAL_GET("application/run/main_scene")) == "" && !DSHViewportMode::worker_enabled) {
 #ifdef TOOLS_ENABLED
 		if (!editor && !project_manager) {
 #endif
@@ -2364,6 +2388,16 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	}
 	if (bool(GLOBAL_GET("application/run/disable_stderr"))) {
 		CoreGlobals::print_error_enabled = false;
+	}
+	if (DSHViewportMode::worker_enabled) {
+		// The worker speaks wire protocol 2 on stdout: keep stdout free of
+		// engine chatter (diagnostics still go to stderr and the log file).
+		quiet_stdout = true;
+		display_driver = "dsh";
+		audio_driver = NULL_AUDIO_DRIVER;
+		CoreGlobals::print_line_enabled = false;
+		OS::get_singleton()->set_stdout_enabled(false);
+		Engine::get_singleton()->_print_header = false;
 	}
 	if (!bool(GLOBAL_GET("application/run/print_header"))) {
 		// --no-header option for project settings.
@@ -3411,11 +3445,11 @@ Error Main::setup2(bool p_show_boot_logo) {
 		display_server = DisplayServer::create(display_driver_idx, rendering_driver, window_mode, window_vsync_mode, window_flags, window_position, window_size, init_screen, context, init_embed_parent_window_id, err);
 		if (err != OK || display_server == nullptr) {
 			String last_name = DisplayServer::get_create_function_name(display_driver_idx);
-
 			// We can't use this display server, try other ones as fallback.
 			// Skip headless (always last registered) because that's not what users
 			// would expect if they didn't request it explicitly.
-			for (int i = 0; i < DisplayServer::get_create_function_count() - 1; i++) {
+			// The DSH worker must never silently fall back to a real-window server.
+			for (int i = 0; i < DisplayServer::get_create_function_count() - 1 && !DSHViewportMode::worker_enabled; i++) {
 				if (i == display_driver_idx) {
 					continue; // Don't try the same twice.
 				}
@@ -3602,7 +3636,6 @@ Error Main::setup2(bool p_show_boot_logo) {
 		OS::get_singleton()->benchmark_begin_measure("Servers", "Rendering");
 
 		rendering_server = memnew(RenderingServerDefault(OS::get_singleton()->is_separate_thread_rendering_enabled()));
-
 		rendering_server->init();
 		//rendering_server->call_set_use_vsync(OS::get_singleton()->_use_vsync);
 		rendering_server->set_render_loop_enabled(!disable_render_loop);
@@ -4386,7 +4419,7 @@ int Main::start() {
 	}
 
 #ifdef TOOLS_ENABLED
-	if (!editor && !project_manager && !cmdline_tool && script.is_empty() && game_path.is_empty()) {
+	if (!DSHViewportMode::worker_enabled && !editor && !project_manager && !cmdline_tool && script.is_empty() && game_path.is_empty()) {
 		// If we end up here, it means we didn't manage to detect what we want to run.
 		// Let's throw an error gently. The code leading to this is pretty brittle so
 		// this might end up triggered by valid usage, in which case we'll have to
@@ -4962,6 +4995,11 @@ bool Main::iteration() {
 	GodotProfileZone("Main::iteration");
 	GodotProfileZoneGroupedFirst(_profile_zone, "prepare");
 	iterating++;
+
+	if (DSHViewportMode::worker_stop_check != nullptr && DSHViewportMode::worker_stop_check()) {
+		// The DSH broker asked the worker to stop (stop command or stdin EOF).
+		return true;
+	}
 
 	const uint64_t ticks = OS::get_singleton()->get_ticks_usec();
 	Engine::get_singleton()->_frame_ticks = ticks;

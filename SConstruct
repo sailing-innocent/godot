@@ -204,6 +204,13 @@ opts.Add(
 opts.Add(BoolVariable("forward_plus_renderer", "Enable the Forward+ renderer (requires RenderingDevice)", True))
 opts.Add(BoolVariable("forward_mobile_renderer", "Enable the Mobile renderer (requires RenderingDevice)", True))
 opts.Add(BoolVariable("vulkan", "Enable the Vulkan rendering driver", True))
+opts.Add(
+    BoolVariable(
+        "dsh_viewport",
+        "Build the DSH (DeepSeek Harness) native viewport worker output path (Windows x64, Vulkan, exports frames as D3D11 shared textures over protocol 2)",
+        False,
+    )
+)
 opts.Add(BoolVariable("opengl3", "Enable the OpenGL/GLES3 rendering driver", True))
 opts.Add(BoolVariable("d3d12", "Enable the Direct3D 12 rendering driver on supported platforms", False))
 opts.Add(BoolVariable("metal", "Enable the Metal rendering driver on supported platforms (Apple arm64 only)", False))
@@ -726,6 +733,12 @@ if not env["rendering_device"] or not (env["forward_mobile_renderer"] or env["fo
     env["d3d12"] = False
     env["metal"] = False
     env["vulkan"] = False
+if env["dsh_viewport"]:
+    if env["platform"] != "windows" or env["arch"] != "x86_64":
+        methods.fatal("The dsh_viewport option is only supported on Windows x64.")
+    if not env["vulkan"] or not env["rendering_device"]:
+        methods.fatal("The dsh_viewport option requires the Vulkan rendering device (vulkan=yes rendering_device=yes).")
+    env.Append(CPPDEFINES=["DSH_VIEWPORT_ENABLED"])
 
 # Must happen after the flags' definition, as configure is when most flags
 # are actually handled to change compile options, etc.

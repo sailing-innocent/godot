@@ -43,6 +43,10 @@
 
 #include <drivers/vulkan/godot_vulkan.h>
 
+#if defined(DSH_VIEWPORT_ENABLED)
+#include "drivers/vulkan/dsh_viewport_frame_sink_vulkan.h"
+#endif
+
 class RenderingContextDriverVulkan : public RenderingContextDriver {
 public:
 	struct Functions {
@@ -136,6 +140,11 @@ public:
 	virtual RenderingDeviceDriver *driver_create() override;
 	virtual void driver_free(RenderingDeviceDriver *p_driver) override;
 	virtual SurfaceID surface_create(const void *p_platform_data) override;
+#if defined(DSH_VIEWPORT_ENABLED)
+	// Creates a headless surface presented through the DSH frame sink
+	// (no VkSurfaceKHR is created). Must be freed with surface_destroy().
+	virtual SurfaceID surface_create_dsh(DSHViewportFrameSinkVulkan *p_sink);
+#endif
 	virtual void surface_set_size(SurfaceID p_surface, uint32_t p_width, uint32_t p_height) override;
 	virtual void surface_set_vsync_mode(SurfaceID p_surface, DisplayServerEnums::VSyncMode p_vsync_mode) override;
 	virtual DisplayServerEnums::VSyncMode surface_get_vsync_mode(SurfaceID p_surface) const override;
@@ -164,6 +173,13 @@ public:
 		uint32_t height = 0;
 		DisplayServerEnums::VSyncMode vsync_mode = DisplayServerEnums::VSYNC_ENABLED;
 		bool needs_resize = false;
+
+#if defined(DSH_VIEWPORT_ENABLED)
+		// Headless DSH viewport surface: not backed by a VkSurfaceKHR, but by
+		// a D3D11 shared texture ring provided by the frame sink.
+		bool dsh_headless = false;
+		DSHViewportFrameSinkVulkan *dsh_sink = nullptr;
+#endif
 
 		bool hdr_output = false;
 		// BT.2408 recommendation of 203 nits for HDR Reference White, rounded to 200

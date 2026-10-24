@@ -48,6 +48,9 @@ private:
 public:
 	SurfaceID surface_get_from_window(DisplayServerEnums::WindowID p_window) const;
 	Error window_create(DisplayServerEnums::WindowID p_window, const void *p_platform_data);
+	// Associates an externally created surface (e.g. a headless DSH viewport
+	// surface) with a window ID without going through platform surface creation.
+	Error window_create_from_surface(DisplayServerEnums::WindowID p_window, SurfaceID p_surface);
 	void window_set_size(DisplayServerEnums::WindowID p_window, uint32_t p_width, uint32_t p_height);
 	void window_set_vsync_mode(DisplayServerEnums::WindowID p_window, DisplayServerEnums::VSyncMode p_vsync_mode);
 	DisplayServerEnums::VSyncMode window_get_vsync_mode(DisplayServerEnums::WindowID p_window) const;
