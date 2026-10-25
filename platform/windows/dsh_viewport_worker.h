@@ -32,9 +32,11 @@
 
 #if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
+#include "core/math/vector3.h"
 #include "core/os/mutex.h"
 #include "core/string/ustring.h"
 #include "core/templates/local_vector.h"
+#include "core/variant/dictionary.h"
 #include "drivers/vulkan/dsh_viewport_frame_sink_vulkan.h"
 #include "scene/main/node.h"
 
@@ -51,7 +53,9 @@ class DisplayServerDSH;
 class SceneTree;
 
 // Demo scene controller (spinning cube + orbit camera), driven by the
-// generic protocol input events through the Input singleton.
+// generic protocol input events through the Input singleton. Drag state is
+// re-derived from the button mask of every motion event, so a focus loss that
+// releases pressed buttons can never leave a stale local "dragging" flag.
 class DSHDemoController : public Node {
 	GDCLASS(DSHDemoController, Node);
 
@@ -60,9 +64,11 @@ class DSHDemoController : public Node {
 	double yaw = 0.0;
 	double pitch = 0.0;
 	double distance = 4.0;
-	bool dragging = false;
 	bool auto_rotate = true;
+	bool right_drag_pan = true; // godot.viewport.v1 setRightDrag may switch this off.
+	Vector3 target; // Pan offset (world units); the camera orbits this point.
 	Vector2 last_pointer;
+	char32_t last_unicode = 0; // Test hook: last pressed key's unicode (0 = none).
 
 	void _update_camera();
 
@@ -74,7 +80,8 @@ public:
 	void setup(const NodePath &p_cube, const NodePath &p_camera);
 	void reset_camera();
 	void set_auto_rotate(bool p_enabled) { auto_rotate = p_enabled; }
-	void release_pointer() { dragging = false; }
+	void set_right_drag_pan(bool p_enabled) { right_drag_pan = p_enabled; }
+	Dictionary capture_state() const; // Test hook: observable controller state for the fake broker.
 	void input(const Ref<InputEvent> &p_event) override;
 };
 
@@ -86,8 +93,10 @@ public:
 class DSHViewportWorker : public DSHViewportFrameSinkVulkan {
 public:
 	static constexpr uint32_t MAX_VIEWPORT_DIMENSION = 2048;
+	static constexpr uint32_t MAX_CSS_DIMENSION = 16384;
 	static constexpr uint64_t SLOT_LEASE_TIMEOUT_NS = 10ULL * 1000 * 1000 * 1000; // Mirrors the graphics101 lease watchdog.
 	static const char *EXTENSION_NAMESPACE;
+	static const char *VIEWPORT_NAMESPACE; // godot.viewport.v1: relative mouse mode and drag behavior.
 
 	static DSHViewportWorker *get_singleton() { return singleton; }
 	static bool static_stop_check(); // Registered as DSHViewportMode::worker_stop_check.
@@ -122,6 +131,19 @@ private:
 	uint32_t pending_resize_height = 0;
 	bool has_pending_resize = false; // Written by stdin thread, consumed in poll().
 
+	// Coordinate mapping (interaction.map.v2): pointer/wheel events arrive in
+	// viewport-local CSS px; the engine window works in physical px. The factors
+	// are locked exactly when a resize is applied (same point as the epoch), so
+	// geometry can never be half-old/half-new. Without cssWidth/cssHeight the
+	// legacy single `scale` factor applies to both axes.
+	double map_scale_x = 1.0;
+	double map_scale_y = 1.0;
+	double pending_scale = 1.0;
+	double pending_css_width = 0.0;
+	double pending_css_height = 0.0;
+	bool has_pending_css = false;
+	Vector2 last_engine_pointer; // Last mapped pointer position, for motion relatives.
+
 	uint64_t stats_last_usec = 0;
 
 	// ---- frame sink state (mixed threads) ----
@@ -139,6 +161,7 @@ private:
 
 	// ---- demo scene (main thread) ----
 	DSHDemoController *demo_controller = nullptr;
+	Vector<String> last_drop_paths; // Test hook: last OS file drop delivered to the engine.
 	bool demo_ready = false;
 	bool demo_rotate_value = true;
 
@@ -150,11 +173,19 @@ private:
 	void _handle_command(const String &p_line);
 	void _handle_input_event(const Dictionary &p_event);
 	void _handle_extension(const String &p_name, const Dictionary &p_payload);
+	void _handle_viewport_extension(const String &p_name, const Dictionary &p_payload);
 	void _inject_key(const Dictionary &p_event);
+	void _inject_drop(const Dictionary &p_event);
 	void _inject_pointer(const Dictionary &p_event);
 	void _inject_wheel(const Dictionary &p_event);
+	void _inject_text(const Dictionary &p_event);
+	void _inject_ime(const Dictionary &p_event);
 	void _apply_pending_resize();
 	void _emit_frame(uint32_t p_slot);
+	Vector2 _map_css_to_engine(double p_x, double p_y) const;
+	void _release_all_input_state();
+	void _apply_focus(bool p_focused);
+	void _emit_extension_event(const String &p_name, const Dictionary &p_payload);
 
 	static String _modifiers_to_string(uint32_t p_modifiers);
 
@@ -175,6 +206,7 @@ public:
 	virtual void wait_all_presents_complete() override;
 
 	Error initialize(uint32_t p_broker_pid); // Stores the broker PID; the D3D11 side initializes on the first create_frames() once the VkDevice exists.
+	void emit_viewport_extension(const String &p_name, const Dictionary &p_payload); // Worker -> client event on the godot.viewport.v1 namespace (e.g. imeState).
 	void set_display_server(DisplayServerDSH *p_display_server) { display_server = p_display_server; }
 	void start(); // Spawns stdin/pump threads; called once the DisplayServer is fully created.
 	void announce(); // Emits the protocol hello (first stdout line); requires the RenderingDevice.

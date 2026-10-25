@@ -76,6 +76,16 @@ class DisplayServerDSH : public DisplayServer {
 	DisplayServerEnums::WindowID window_id_counter = 1; // 0 is reserved for the main window.
 	Point2i mouse_position;
 
+	// ---- interaction state owned by the DSH worker (no OS window behind us) ----
+	DisplayServerEnums::MouseMode mouse_mode = DisplayServerEnums::MOUSE_MODE_VISIBLE;
+	bool relative_mouse_mode = false; // godot.viewport.v1 setRelativeMouseMode.
+	float content_scale = 1.0; // Physical px per logical (CSS) px; locked with each resize, Godot screen-scale semantics.
+	bool ime_active = false;
+	Point2i ime_position;
+	Callable drop_files_callback;
+	String ime_preedit_text;
+	Vector2i ime_preedit_selection; // Caret/selection range inside the preedit string.
+
 #if defined(RD_ENABLED)
 	RenderingContextDriverVulkanWindows *rendering_context = nullptr;
 	RenderingDevice *rendering_device = nullptr;
@@ -92,9 +102,9 @@ public:
 	Point2i screen_get_position(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return Point2i(); }
 	Size2i screen_get_size(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override;
 	Rect2i screen_get_usable_rect(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return Rect2i(Point2i(), screen_get_size(p_screen)); }
-	int screen_get_dpi(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return 96; }
-	float screen_get_scale(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return 1; }
-	float screen_get_max_scale() const override { return 1; }
+	int screen_get_dpi(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return (int)(96 * content_scale); }
+	float screen_get_scale(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return content_scale; }
+	float screen_get_max_scale() const override { return content_scale; }
 	float screen_get_refresh_rate(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return SCREEN_REFRESH_RATE_FALLBACK; }
 	void screen_set_orientation(DisplayServerEnums::ScreenOrientation p_orientation, int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) override {}
 	void screen_set_keep_on(bool p_enable) override {}
@@ -114,7 +124,13 @@ public:
 	void window_set_window_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	void window_set_input_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	void window_set_input_text_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override { drop_files_callback = p_callable; }
+	// Delivers an OS file drop into the engine (Window::files_dropped chain).
+	void dsh_dispatch_drop_files(const Vector<String> &p_files) {
+		if (drop_files_callback.is_valid()) {
+			drop_files_callback.call(p_files);
+		}
+	}
 
 	void window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 
@@ -158,9 +174,14 @@ public:
 	bool window_can_draw(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 	bool can_any_window_draw() const override;
 
-	void window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	void window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	void window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+	void window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	void window_set_ime_rect(const Rect2i &p_rect, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	// Forwards the current IME state to the client (imeState extension event),
+	// so it can host a hidden editable element at the exact caret position.
+	void dsh_notify_ime_changed();
+	String ime_get_text() const override { return ime_preedit_text; }
+	Point2i ime_get_selection() const override { return ime_preedit_selection; }
 
 	int64_t window_get_native_handle(DisplayServerEnums::HandleType p_handle_type, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return 0; }
 
@@ -179,9 +200,10 @@ public:
 	void tts_resume() override {}
 	void tts_stop() override {}
 
-	void mouse_set_mode(DisplayServerEnums::MouseMode p_mode) override {}
+	void mouse_set_mode(DisplayServerEnums::MouseMode p_mode) override { mouse_mode = p_mode; }
 	void mouse_set_mode_override(DisplayServerEnums::MouseMode p_mode) override {}
 	void mouse_set_mode_override_enabled(bool p_override_enabled) override {}
+	DisplayServerEnums::MouseMode mouse_get_mode() const override { return mouse_mode; }
 	Point2i mouse_get_position() const override { return mouse_position; }
 	void clipboard_set(const String &p_text) override {}
 	String clipboard_get() const override { return String(); }
@@ -214,6 +236,18 @@ public:
 	DSHViewportWorker *get_worker() const { return worker; }
 
 	void dsh_set_mouse_position(const Point2i &p_position) { mouse_position = p_position; }
+	void dsh_set_relative_mouse_mode(bool p_enabled) { relative_mouse_mode = p_enabled; }
+	bool dsh_is_relative_mouse_mode() const { return relative_mouse_mode; }
+	void dsh_set_content_scale(float p_scale) { content_scale = CLAMP(p_scale, 0.25f, 8.0f); }
+	float dsh_get_content_scale() const { return content_scale; }
+	void dsh_set_ime_preedit(const String &p_text, int p_cursor_start, int p_cursor_end) {
+		ime_preedit_text = p_text;
+		const int length = p_text.length();
+		// Selection range as (caret, length) like the IMM-driven display servers.
+		const int caret = CLAMP(p_cursor_start, 0, length);
+		const int end = p_cursor_end > caret ? CLAMP(p_cursor_end, caret, length) : length;
+		ime_preedit_selection = Vector2i(caret, end - caret);
+	}
 
 	static void register_dsh_driver();
 

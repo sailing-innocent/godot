@@ -32,6 +32,8 @@
 
 #include "display_server_dsh.h"
 
+#include "core/variant/dictionary.h"
+
 #if defined(RD_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
 #include "core/input/input.h"
@@ -250,6 +252,41 @@ bool DisplayServerDSH::can_any_window_draw() const {
 	// (hidden suspends production entirely, per protocol 2 semantics).
 	return worker != nullptr && worker->has_applied_surface() && worker->is_viewport_visible() && window_can_draw(DisplayServerEnums::MAIN_WINDOW_ID);
 }
+
+#if defined(DSH_VIEWPORT_ENABLED)
+void DisplayServerDSH::window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window) {
+	ime_active = p_active;
+	dsh_notify_ime_changed();
+}
+
+void DisplayServerDSH::window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window) {
+	ime_position = p_pos;
+	dsh_notify_ime_changed();
+}
+
+void DisplayServerDSH::dsh_notify_ime_changed() {
+	if (worker == nullptr) {
+		return;
+	}
+	// Engine-physical window coordinates; the client maps them back to CSS px
+	// against the applied surface before positioning its hidden IME host.
+	Dictionary payload;
+	payload["active"] = ime_active;
+	payload["x"] = ime_position.x;
+	payload["y"] = ime_position.y;
+	worker->emit_viewport_extension("imeState", payload);
+}
+#else
+void DisplayServerDSH::window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window) {
+	ime_active = p_active;
+}
+
+void DisplayServerDSH::window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window) {
+	ime_position = p_pos;
+}
+
+void DisplayServerDSH::dsh_notify_ime_changed() {}
+#endif // DSH_VIEWPORT_ENABLED
 
 void DisplayServerDSH::process_events() {
 	if (worker) {

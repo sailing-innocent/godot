@@ -58,6 +58,7 @@
 #include "platform/web/dom_keys.inc"
 
 const char *DSHViewportWorker::EXTENSION_NAMESPACE = "godot.demo.v1";
+const char *DSHViewportWorker::VIEWPORT_NAMESPACE = "godot.viewport.v1";
 DSHViewportWorker *DSHViewportWorker::singleton = nullptr;
 
 namespace {
@@ -99,6 +100,7 @@ void DSHDemoController::reset_camera() {
 	yaw = 0.35;
 	pitch = 0.25;
 	distance = 4.0;
+	target = Vector3();
 }
 
 void DSHDemoController::_update_camera() {
@@ -108,11 +110,15 @@ void DSHDemoController::_update_camera() {
 	}
 	const double clamped_pitch = CLAMP(pitch, -1.45, 1.45);
 	Vector3 eye(Math::sin(yaw) * Math::cos(clamped_pitch), Math::sin(clamped_pitch), Math::cos(yaw) * Math::cos(clamped_pitch));
-	camera->set_position(eye * distance);
-	camera->look_at(Vector3(), Vector3(0, 1, 0));
+	camera->set_position(target + eye * distance);
+	camera->look_at(target, Vector3(0, 1, 0));
 }
 
 void DSHDemoController::input(const Ref<InputEvent> &p_event) {
+	Ref<InputEventKey> key_event = p_event;
+	if (key_event.is_valid() && key_event->is_pressed()) {
+		last_unicode = key_event->get_unicode();
+	}
 	Ref<InputEventMouseButton> button = p_event;
 	if (button.is_valid()) {
 		if (button->get_button_index() == MouseButton::WHEEL_UP && button->is_pressed()) {
@@ -121,20 +127,73 @@ void DSHDemoController::input(const Ref<InputEvent> &p_event) {
 		} else if (button->get_button_index() == MouseButton::WHEEL_DOWN && button->is_pressed()) {
 			distance = MIN(12.0, distance + 0.35 * button->get_factor());
 			_update_camera();
-		} else if (button->get_button_index() == MouseButton::LEFT) {
-			dragging = button->is_pressed();
+		} else if (button->get_button_index() >= MouseButton::LEFT && button->get_button_index() <= MouseButton::RIGHT && button->is_pressed()) {
+			// Remember the press anchor; the drag itself is derived per motion
+			// event from the live button mask (see below).
 			last_pointer = button->get_position();
 		}
 		return;
 	}
 	Ref<InputEventMouseMotion> motion = p_event;
-	if (motion.is_valid() && dragging) {
-		Vector2 relative = motion->get_position() - last_pointer;
+	if (motion.is_valid()) {
+		const MouseButtonMask mask = motion->get_button_mask();
+		// MouseButtonMask is a scoped enum without bitwise operators: test bits
+		// through the integer value (the protocol buttons field uses the same
+		// DOM bit layout).
+		const int mask_bits = (int)mask;
+		const bool orbit_drag = (mask_bits & (int)MouseButtonMask::LEFT) != 0 && !motion->is_shift_pressed();
+		const bool pan_drag = (mask_bits & (int)MouseButtonMask::MIDDLE) != 0
+				|| (mask_bits & (int)MouseButtonMask::LEFT) != 0 && motion->is_shift_pressed()
+				|| (mask_bits & (int)MouseButtonMask::RIGHT) != 0 && right_drag_pan;
+		if (mask_bits == 0 || (!orbit_drag && !pan_drag)) {
+			last_pointer = motion->get_position();
+			return;
+		}
+		Vector2 relative = motion->get_relative();
+		if (relative == Vector2()) {
+			relative = motion->get_position() - last_pointer;
+		}
 		last_pointer = motion->get_position();
-		yaw -= relative.x * 0.006;
-		pitch = CLAMP(pitch + relative.y * 0.006, -1.45, 1.45);
+		if (orbit_drag) {
+			yaw -= relative.x * 0.006;
+			pitch = CLAMP(pitch + relative.y * 0.006, -1.45, 1.45);
+		} else {
+			// Pan in the camera plane; scale by distance so dolly speed feels uniform.
+			Camera3D *camera = Object::cast_to<Camera3D>(get_node_or_null(camera_path));
+			if (camera) {
+				const Basis basis = camera->get_global_transform().basis;
+				target += (-basis.get_column(0) * relative.x + basis.get_column(1) * relative.y) * (distance * 0.0016);
+			}
+		}
 		_update_camera();
 	}
+}
+
+Dictionary DSHDemoController::capture_state() const {
+	Dictionary state;
+	state["yaw"] = yaw;
+	state["pitch"] = pitch;
+	state["distance"] = distance;
+	state["autoRotate"] = auto_rotate;
+	state["rightDragPan"] = right_drag_pan;
+	// The Input singleton mask is authoritative: release_pressed_events()
+	// (focus loss, visibility, pointer cancel) clears it, so a stale local
+	// flag can never survive an unfocus.
+	Input *input = Input::get_singleton();
+	const int mask_bits = input ? (int)input->get_mouse_button_mask() : 0;
+	state["dragging"] = mask_bits != 0;
+	state["buttons"] = (int64_t)mask_bits;
+	state["lastUnicode"] = (int64_t)last_unicode;
+	Array pointer;
+	pointer.push_back(last_pointer.x);
+	pointer.push_back(last_pointer.y);
+	state["lastPointer"] = pointer;
+	Array target_array;
+	target_array.push_back(target.x);
+	target_array.push_back(target.y);
+	target_array.push_back(target.z);
+	state["target"] = target_array;
+	return state;
 }
 
 void DSHDemoController::_notification(int p_what) {
@@ -379,7 +438,9 @@ void DSHViewportWorker::_send_hello() {
 		gpu_name = String(properties.deviceName);
 	}
 	protocol_print(String("{\"type\":\"hello\",\"protocol\":2,\"transport\":\"d3d11-nt-rgba8\",\"extensions\":[\"")
-			+ EXTENSION_NAMESPACE + "\"],\"backend\":\"godot-vulkan\",\"vendorId\":" + uitos(vendor_id)
+			+ EXTENSION_NAMESPACE + "\",\"" + VIEWPORT_NAMESPACE
+			+ "\"],\"features\":[\"interaction.map.v2\",\"input.text\",\"input.ime\",\"pointer.lock\",\"input.drop\"]"
+			+ ",\"backend\":\"godot-vulkan\",\"vendorId\":" + uitos(vendor_id)
 			+ ",\"deviceId\":" + uitos(device_id) + ",\"gpu\":" + JSON::stringify(gpu_name)
 			+ ",\"runtimeCpuReadbacks\":0,\"exportGpuCopies\":0}");
 }
@@ -507,8 +568,31 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 			diagnostic_print("DSH viewport: resize beyond the 2048x2048 quota ignored.");
 			return;
 		}
+		double css_width = 0.0;
+		double css_height = 0.0;
+		bool has_css = false;
+		if (message.has("cssWidth") || message.has("cssHeight")) {
+			// interaction.map.v2: per-axis CSS geometry for exact inverse mapping.
+			// Both fields are required together; partial or non-finite values fall
+			// back to the legacy single-scale behavior.
+			const double cw = message.get("cssWidth", 0.0);
+			const double ch = message.get("cssHeight", 0.0);
+			if (cw > 0.0 && ch > 0.0 && cw <= MAX_CSS_DIMENSION && ch <= MAX_CSS_DIMENSION
+					&& Math::is_finite(cw) && Math::is_finite(ch)) {
+				css_width = cw;
+				css_height = ch;
+				has_css = true;
+			} else {
+				diagnostic_print("DSH viewport: resize with invalid cssWidth/cssHeight ignored (both finite, 0<x<=16384 required).");
+				return;
+			}
+		}
 		pending_resize_width = width;
 		pending_resize_height = height;
+		pending_scale = MAX(1e-6, (double)message.get("scale", 1.0));
+		pending_css_width = css_width;
+		pending_css_height = css_height;
+		has_pending_css = has_css;
 		has_pending_resize = true;
 		return;
 	}
@@ -516,10 +600,9 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 		const bool visible = message.get("value", true);
 		viewport_visible.store(visible);
 		if (!visible) {
-			Input::get_singleton()->release_pressed_events();
-			if (demo_controller) {
-				demo_controller->release_pointer();
-			}
+			// Clears every pressed key/button; the demo controller derives its
+			// drag state from the live Input mask, so no separate reset is needed.
+			_apply_focus(false);
 		}
 		return;
 	}
@@ -541,13 +624,15 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 		last_input_seq.store(seq);
 		if (kind == "extension") {
 			const String ns = message.get("namespace", "");
-			if (ns != EXTENSION_NAMESPACE) {
-				diagnostic_print("DSH viewport: unknown extension namespace '" + ns + "'.");
-				return;
-			}
 			const String name = message.get("name", "");
 			Dictionary payload = message.get("payload", Dictionary());
-			_handle_extension(name, payload);
+			if (ns == EXTENSION_NAMESPACE) {
+				_handle_extension(name, payload);
+			} else if (ns == VIEWPORT_NAMESPACE) {
+				_handle_viewport_extension(name, payload);
+			} else {
+				diagnostic_print("DSH viewport: unknown extension namespace '" + ns + "'.");
+			}
 		} else {
 			Dictionary event = message.get("event", Dictionary());
 			_handle_input_event(event);
@@ -568,8 +653,106 @@ void DSHViewportWorker::_handle_extension(const String &p_name, const Dictionary
 		demo_controller->reset_camera();
 	} else if (p_name == "rotate") {
 		demo_controller->set_auto_rotate(p_payload.get("value", true));
+	} else if (p_name == "query") {
+		// Test hook for the fake broker (scripts/godot.mjs verify): reports the
+		// controller state as a worker extension event so coordinate mapping and
+		// button semantics stay observable end to end.
+		// Input events may still sit in the accumulated queue (flushed once per
+		// main-loop iteration); make the state reply deterministic by forcing
+		// the pending dispatch now, before sampling the controller.
+		Input::get_singleton()->flush_buffered_events();
+		Dictionary state = demo_controller->capture_state();
+		if (!last_drop_paths.is_empty()) {
+			Array dropped;
+			for (int i = 0; i < (int)last_drop_paths.size(); i++) {
+				dropped.push_back(last_drop_paths[i]);
+			}
+			state["lastDropPaths"] = dropped;
+		}
+		if (display_server) {
+			const Point2i mouse = display_server->mouse_get_position();
+			Array mouse_array;
+			mouse_array.push_back(mouse.x);
+			mouse_array.push_back(mouse.y);
+			state["mouse"] = mouse_array;
+		}
+		_emit_extension_event("state", state);
 	} else {
 		diagnostic_print("DSH viewport: unknown extension operation '" + p_name + "'.");
+	}
+}
+
+void DSHViewportWorker::_handle_viewport_extension(const String &p_name, const Dictionary &p_payload) {
+	if (p_name == "setRelativeMouseMode") {
+		const bool enabled = p_payload.get("value", false);
+		if (display_server) {
+			display_server->dsh_set_relative_mouse_mode(enabled);
+		}
+	} else if (p_name == "setRightDrag") {
+		const String mode = p_payload.get("value", "pan");
+		if (demo_controller) {
+			demo_controller->set_right_drag_pan(mode != "none");
+		}
+	} else {
+		diagnostic_print("DSH viewport: unknown viewport operation '" + p_name + "'.");
+	}
+}
+
+void DSHViewportWorker::emit_viewport_extension(const String &p_name, const Dictionary &p_payload) {
+	protocol_print(String("{\"type\":\"extension\",\"namespace\":\"") + VIEWPORT_NAMESPACE + "\",\"name\":"
+			+ JSON::stringify(p_name) + ",\"payload\":" + JSON::stringify(p_payload) + "}");
+}
+
+void DSHViewportWorker::_emit_extension_event(const String &p_name, const Dictionary &p_payload) {
+	protocol_print(String("{\"type\":\"extension\",\"namespace\":\"") + EXTENSION_NAMESPACE + "\",\"name\":"
+			+ JSON::stringify(p_name) + ",\"payload\":" + JSON::stringify(p_payload) + "}");
+}
+
+Vector2 DSHViewportWorker::_map_css_to_engine(double p_x, double p_y) const {
+	return Vector2((float)(p_x * map_scale_x), (float)(p_y * map_scale_y));
+}
+
+void DSHViewportWorker::_release_all_input_state() {
+	Input *input = Input::get_singleton();
+	if (!input) {
+		return;
+	}
+	// Input::release_pressed_events() clears keys/actions but never the mouse
+	// button mask (a real OS delivers the matching button-ups when the window
+	// loses focus; the synthetic focus path must do the same explicitly, or a
+	// drag would survive the unfocus forever).
+	const int mask = (int)input->get_mouse_button_mask();
+	static const MouseButton buttons_by_bit[5] = { MouseButton::LEFT, MouseButton::RIGHT, MouseButton::MIDDLE, MouseButton::MB_XBUTTON1, MouseButton::MB_XBUTTON2 };
+	for (int bit = 0; bit < 5 && mask != 0; bit++) {
+		if ((mask & (1 << bit)) == 0) {
+			continue;
+		}
+		Ref<InputEventMouseButton> event;
+		event.instantiate();
+		event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+		event->set_button_index(buttons_by_bit[bit]);
+		event->set_pressed(false);
+		event->set_position(last_engine_pointer);
+		event->set_global_position(last_engine_pointer);
+		event->set_button_mask((MouseButtonMask)(mask & ~(1 << bit)));
+		input->parse_input_event(event);
+	}
+	input->release_pressed_events();
+}
+
+void DSHViewportWorker::_apply_focus(bool p_focused) {
+	MainLoop *main_loop = OS::get_singleton()->get_main_loop();
+	if (!main_loop) {
+		return;
+	}
+	// Mirror a real OS focus change: SceneTree flips Input::application_focused
+	// and releases pressed input on FOCUS_OUT (it is a friend of Input; the
+	// flag is private, so the notification path is the only legal route).
+	main_loop->notification(p_focused ? MainLoop::NOTIFICATION_APPLICATION_FOCUS_IN : MainLoop::NOTIFICATION_APPLICATION_FOCUS_OUT);
+	if (!p_focused) {
+		// release_pressed_events() never clears the mouse button mask (the OS
+		// would deliver button-ups; nothing does in this synthetic viewport).
+		_release_all_input_state();
 	}
 }
 
@@ -581,11 +764,14 @@ void DSHViewportWorker::_handle_input_event(const Dictionary &p_event) {
 		_inject_wheel(p_event);
 	} else if (type == "key") {
 		_inject_key(p_event);
+	} else if (type == "text") {
+		_inject_text(p_event);
+	} else if (type == "ime") {
+		_inject_ime(p_event);
+	} else if (type == "drop") {
+		_inject_drop(p_event);
 	} else if (type == "focus") {
-		const bool focused = p_event.get("focused", true);
-		if (!focused) {
-			Input::get_singleton()->release_pressed_events();
-		}
+		_apply_focus(p_event.get("focused", true));
 	} else {
 		diagnostic_print("DSH viewport: unknown input event type '" + type + "'.");
 	}
@@ -593,12 +779,22 @@ void DSHViewportWorker::_handle_input_event(const Dictionary &p_event) {
 
 void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 	const String phase = p_event.get("phase", "move");
+	// A cancel never carries a usable button value: release everything up front
+	// (same path as a focus loss) instead of bailing out on button == NONE.
+	if (phase == "cancel") {
+		_release_all_input_state();
+		return;
+	}
 	const double x = p_event.get("x", 0.0);
 	const double y = p_event.get("y", 0.0);
 	const int buttons = p_event.get("buttons", 0);
-	const Vector2 position(x, y);
+	const uint32_t modifiers = p_event.get("modifiers", 0);
+	// interaction.map.v2: the protocol position is viewport-local CSS px; the
+	// engine window is physical px. Factors were locked when the current epoch's
+	// resize was applied.
+	const Vector2 position = _map_css_to_engine(x, y);
 	if (display_server) {
-		display_server->dsh_set_mouse_position(Point2i((int)x, (int)y));
+		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
 	}
 
 	if (phase == "move") {
@@ -608,9 +804,24 @@ void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 		motion->set_position(position);
 		motion->set_global_position(position);
 		motion->set_button_mask((MouseButtonMask)buttons);
+		motion->set_shift_pressed(modifiers & 1);
+		motion->set_ctrl_pressed(modifiers & 2);
+		motion->set_alt_pressed(modifiers & 4);
+		motion->set_meta_pressed(modifiers & 8);
+		Vector2 relative;
+		if (p_event.has("movementX") || p_event.has("movementY")) {
+			// Pointer-lock deltas (CSS px) take precedence: the OS position is
+			// frozen while the pointer is locked, so position deltas are useless.
+			relative = _map_css_to_engine((double)p_event.get("movementX", 0.0), (double)p_event.get("movementY", 0.0));
+		} else {
+			relative = position - last_engine_pointer;
+		}
+		last_engine_pointer = position;
+		motion->set_relative(relative);
 		Input::get_singleton()->parse_input_event(motion);
 		return;
 	}
+	last_engine_pointer = position;
 
 	int button_index = (int)p_event.get("button", -1);
 	MouseButton button = MouseButton::NONE;
@@ -637,10 +848,11 @@ void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 	event->set_position(position);
 	event->set_global_position(position);
 	event->set_button_mask((MouseButtonMask)(pressed ? (buttons | (1 << ((int)button - 1))) : (buttons & ~(1 << ((int)button - 1)))));
+	event->set_shift_pressed(modifiers & 1);
+	event->set_ctrl_pressed(modifiers & 2);
+	event->set_alt_pressed(modifiers & 4);
+	event->set_meta_pressed(modifiers & 8);
 	Input::get_singleton()->parse_input_event(event);
-	if (phase == "cancel" && demo_controller) {
-		Input::get_singleton()->release_pressed_events();
-	}
 }
 
 void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
@@ -654,16 +866,127 @@ void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
 	event.instantiate();
 	event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
 	event->set_button_index(dominant > 0 ? (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_DOWN : MouseButton::WHEEL_RIGHT)
-										 : (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_UP : MouseButton::WHEEL_LEFT));
+									 : (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_UP : MouseButton::WHEEL_LEFT));
 	event->set_factor(CLAMP(Math::abs(dominant) / 100.0, 0.1, 10.0));
-	event->set_position(display_server ? Point2(display_server->mouse_get_position()) : Point2());
-	event->set_global_position(event->get_position());
+	// Use the coordinates carried by the event itself (mapped CSS -> physical);
+	// the wheel may sit far away from the last pointer position.
+	const Vector2 position = _map_css_to_engine(p_event.get("x", 0.0), p_event.get("y", 0.0));
+	event->set_position(position);
+	event->set_global_position(position);
+	if (display_server) {
+		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
+	}
 
 	event->set_pressed(true);
 	Input::get_singleton()->parse_input_event(event);
 	Ref<InputEventMouseButton> release = event->duplicate();
 	release->set_pressed(false);
 	Input::get_singleton()->parse_input_event(release);
+}
+
+void DSHViewportWorker::_inject_text(const Dictionary &p_event) {
+	const String text = p_event.get("text", "");
+	if (text.is_empty()) {
+		return;
+	}
+	// Godot 4 has no dedicated text input event: committed text reaches LineEdit
+	// and friends as pressed key events carrying a unicode codepoint. Newlines
+	// and tabs are mapped to their Enter/Tab key equivalents.
+	const int length = text.length();
+	for (int i = 0; i < length; i++) {
+		const char32_t codepoint = text[i];
+		Ref<InputEventKey> event;
+		event.instantiate();
+		event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+		event->set_pressed(true);
+		event->set_echo(false);
+		if (codepoint == '\n' || codepoint == '\r') {
+			event->set_keycode(Key::ENTER);
+			event->set_physical_keycode(Key::ENTER);
+			event->set_unicode(10);
+		} else if (codepoint == '\t') {
+			event->set_keycode(Key::TAB);
+			event->set_physical_keycode(Key::TAB);
+			event->set_unicode(9);
+		} else {
+			event->set_keycode(Key::NONE);
+			event->set_physical_keycode(Key::NONE);
+			event->set_unicode(codepoint);
+		}
+		Input::get_singleton()->parse_input_event(event);
+		Ref<InputEventKey> release = event->duplicate();
+		release->set_pressed(false);
+		Input::get_singleton()->parse_input_event(release);
+	}
+}
+
+void DSHViewportWorker::_inject_ime(const Dictionary &p_event) {
+	if (!display_server) {
+		return;
+	}
+	const String state = p_event.get("state", "");
+	const String text = p_event.get("text", "");
+	if (state == "start" || state == "update") {
+		// Preedit surface: the client reports in-progress composition; LineEdit
+		// and TextEdit re-query ime_get_text()/ime_get_selection() when the
+		// NOTIFICATION_OS_IME_UPDATE propagation reaches them.
+		display_server->dsh_set_ime_preedit(text, p_event.get("cursorStart", 0), p_event.get("cursorEnd", 0));
+	} else if (state == "commit") {
+		display_server->dsh_set_ime_preedit(String(), 0, 0);
+		if (!text.is_empty()) {
+			Dictionary commit;
+			commit["type"] = "text";
+			commit["text"] = text;
+			_inject_text(commit);
+		}
+	} else if (state == "cancel") {
+		display_server->dsh_set_ime_preedit(String(), 0, 0);
+	} else {
+		diagnostic_print("DSH viewport: unknown ime state '" + state + "'.");
+		return;
+	}
+	MainLoop *main_loop = OS::get_singleton()->get_main_loop();
+	if (main_loop) {
+		main_loop->notification(MainLoop::NOTIFICATION_OS_IME_UPDATE);
+	}
+}
+
+void DSHViewportWorker::_inject_drop(const Dictionary &p_event) {
+	// The editor resolves the drop target from the current mouse position, so
+	// land a motion event at the drop point first (same contract as a real OS,
+	// where the drag cursor is there when the button releases).
+	const double x = p_event.get("x", 0.0);
+	const double y = p_event.get("y", 0.0);
+	const Vector2 position = _map_css_to_engine(x, y);
+	if (display_server) {
+		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
+	}
+	Ref<InputEventMouseMotion> motion;
+	motion.instantiate();
+	motion->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+	motion->set_position(position);
+	motion->set_global_position(position);
+	motion->set_button_mask(MouseButtonMask::NONE);
+	motion->set_relative(position - last_engine_pointer);
+	last_engine_pointer = position;
+	Input::get_singleton()->parse_input_event(motion);
+
+	const Array paths_array = p_event.get("paths", Array());
+	Vector<String> paths;
+	for (int i = 0; i < (int)paths_array.size(); i++) {
+		paths.push_back(String(paths_array[i]));
+	}
+	if (paths.is_empty()) {
+		return;
+	}
+	// Test hook: keep the last drop observable for the fake broker.
+	last_drop_paths.clear();
+	for (int i = 0; i < paths.size(); i++) {
+		last_drop_paths.push_back(paths[i]);
+	}
+	if (display_server) {
+		display_server->dsh_dispatch_drop_files(paths);
+	}
 }
 
 void DSHViewportWorker::_inject_key(const Dictionary &p_event) {
@@ -676,10 +999,17 @@ void DSHViewportWorker::_inject_key(const Dictionary &p_event) {
 	}
 	const bool down = p_event.get("down", false);
 	const uint32_t modifiers = p_event.get("modifiers", 0);
+	// Printable character carried by the DOM key event (input.text capability):
+	// text fields only insert on InputEventKey::unicode, keycode alone drives
+	// shortcuts. JSON conversion already merged surrogate pairs into char32.
+	const String key_text = p_event.get("key", "");
 	Ref<InputEventKey> event;
 	event.instantiate();
 	event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
 	event->set_pressed(down);
+	if (key_text.length() == 1) {
+		event->set_unicode(key_text[0]);
+	}
 	event->set_keycode(key);
 	event->set_physical_keycode(key);
 	event->set_echo(down && (bool)p_event.get("repeat", false));
@@ -712,14 +1042,36 @@ void DSHViewportWorker::_apply_pending_resize() {
 
 	// Establish the new epoch BEFORE any frame can be emitted for it, and
 	// announce the surface up front: the broker rejects frames with epoch < 1
-	// and frames must never race their own surface announcement.
+	// and frames must never race their own surface announcement. The coordinate
+	// mapping factors are locked at exactly this point, together with the epoch,
+	// so input mapping and surface geometry can never disagree.
 	const uint64_t new_epoch = ++epoch_counter;
 	current_epoch.store(new_epoch);
 	surface_width.store(width);
 	surface_height.store(height);
-	protocol_print(String("{\"type\":\"surface\",\"epoch\":") + uitos(new_epoch)
+	if (has_pending_css) {
+		map_scale_x = width / pending_css_width;
+		map_scale_y = height / pending_css_height;
+	} else {
+		// Legacy graphics101 behavior: one scale for both axes.
+		map_scale_x = pending_scale;
+		map_scale_y = pending_scale;
+	}
+	if (display_server) {
+		// Content scale follows Godot semantics (physical px per logical unit):
+	// our window coordinates are physical, so the logical (css) size is
+	// physical / map_scale_x.
+	display_server->dsh_set_content_scale(CLAMP(map_scale_x, 0.25, 8.0));
+	}
+	String surface_line = String("{\"type\":\"surface\",\"epoch\":") + uitos(new_epoch)
 			+ ",\"width\":" + uitos(width) + ",\"height\":" + uitos(height)
-			+ ",\"slots\":" + uitos(MAX_SLOTS) + "}");
+			+ ",\"slots\":" + uitos(MAX_SLOTS);
+	if (has_pending_css) {
+		surface_line += ",\"cssWidth\":" + JSON::stringify(Variant(pending_css_width))
+				+ ",\"cssHeight\":" + JSON::stringify(Variant(pending_css_height));
+	}
+	surface_line += "}";
+	protocol_print(surface_line);
 	display_server->window_set_size(Size2i((int)width, (int)height), DisplayServerEnums::MAIN_WINDOW_ID);
 }
 
