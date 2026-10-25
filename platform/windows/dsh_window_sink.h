@@ -32,16 +32,16 @@
 
 #if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
+#include "dsh_shared_frames_win32.h"
+
 #include "core/error/error_list.h"
 #include "core/templates/local_vector.h"
+#include "drivers/vulkan/dsh_viewport_frame_sink_vulkan.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
-
-#include "dsh_shared_frames_win32.h"
-#include "drivers/vulkan/dsh_viewport_frame_sink_vulkan.h"
 
 // Per-window presentation sink for DSH multi-window (protocol v2.1). One
 // instance backs one engine sub-window surface: its own D3D11/Vulkan imported
@@ -68,8 +68,8 @@ class DSHWindowSink : public DSHViewportFrameSinkVulkan {
 	uint64_t next_present_value = 0;
 	std::atomic<bool> slot_free[MAX_SLOTS];
 
-	uint64_t epoch = 0; // Bumped on every create_frames(); lease key per protocol v2.1.
-	uint64_t published_epoch = 0; // Last epoch announced through a surface receipt.
+	std::atomic<uint64_t> epoch{ 0 }; // Bumped on every create_frames(); lease key per protocol v2.1.
+	std::atomic<uint64_t> published_epoch{ 0 }; // Last epoch announced through a surface receipt.
 
 public:
 	DSHWindowSink() {
@@ -101,9 +101,9 @@ public:
 	virtual bool are_all_slots_free() const override;
 	virtual void wait_all_presents_complete() override;
 
-	uint64_t get_epoch() const { return epoch; }
-	uint64_t get_published_epoch() const { return published_epoch; }
-	void mark_epoch_published(uint64_t p_epoch) { published_epoch = p_epoch; }
+	uint64_t get_epoch() const { return epoch.load(); }
+	uint64_t get_published_epoch() const { return published_epoch.load(); }
+	void mark_epoch_published(uint64_t p_epoch) { published_epoch.store(p_epoch); }
 	uint32_t get_width() const { return pool.width; }
 	uint32_t get_height() const { return pool.height; }
 

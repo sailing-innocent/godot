@@ -110,7 +110,6 @@ Error DSHWindowSink::create_frames(VkPhysicalDevice p_physical_device, VkDevice 
 			slot_free[i].store(i < slot_count);
 		}
 		pending_presents.clear();
-		next_present_value = 0;
 		epoch++;
 		sink_cv.notify_all();
 	}

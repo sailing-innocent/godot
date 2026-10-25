@@ -32,6 +32,9 @@
 
 #if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
+#include "dsh_shared_frames_win32.h"
+#include "dsh_window_sink.h"
+
 #include "core/math/rect2i.h"
 #include "core/math/vector3.h"
 #include "core/os/mutex.h"
@@ -48,9 +51,6 @@
 #include <deque>
 #include <mutex>
 #include <thread>
-
-#include "dsh_shared_frames_win32.h"
-#include "dsh_window_sink.h"
 
 class DisplayServerDSH;
 class SceneTree;
@@ -175,10 +175,11 @@ private:
 	double pending_css_height = 0.0;
 	bool has_pending_css = false;
 	Vector2 last_engine_pointer; // Last mapped pointer position, for motion relatives.
+	DisplayServerEnums::WindowID last_pointer_window = DisplayServerEnums::MAIN_WINDOW_ID;
 
 	// ---- multi-window state (protocol v2.1, main thread) ----
 	HashMap<uint32_t, SubWindowState> sub_windows;
-	// Pump-thread snapshot of the active sub-window sinks; guarded by sinks_mutex
+	// Pump access and sink removal are serialized by sinks_mutex
 	// (the registry itself is main-thread only).
 	std::mutex sinks_mutex;
 	LocalVector<std::pair<uint32_t, DSHWindowSink *>> active_sinks;
@@ -192,7 +193,6 @@ private:
 	// ---- frame sink state (mixed threads, main window) ----
 	DSHSharedFramesWin32 frames_factory;
 	DSHSharedFramesWin32::Pool frames_pool;
-	bool frames_pool_ready = false;
 	VkDevice vk_device = VK_NULL_HANDLE;
 	VkSemaphore completion_semaphore = VK_NULL_HANDLE;
 	mutable std::mutex sink_mutex;

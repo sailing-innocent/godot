@@ -3355,13 +3355,20 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 		VkTimelineSemaphoreSubmitInfo dsh_timeline_submit_info = {};
 		thread_local LocalVector<uint64_t> dsh_signal_semaphore_values;
+		thread_local LocalVector<uint64_t> dsh_wait_semaphore_values;
 		dsh_signal_semaphore_values.clear();
+		dsh_wait_semaphore_values.clear();
 		if (!dsh_present_values.is_empty()) {
 			uint32_t binary_semaphore_count = signal_semaphores.size() - dsh_present_values.size();
 			for (uint32_t i = 0; i < signal_semaphores.size(); i++) {
 				dsh_signal_semaphore_values.push_back(i < binary_semaphore_count ? 0 : dsh_present_values[i - binary_semaphore_count]);
 			}
+			for (uint32_t i = 0; i < wait_semaphores.size(); i++) {
+				dsh_wait_semaphore_values.push_back(0);
+			}
 			dsh_timeline_submit_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+			dsh_timeline_submit_info.waitSemaphoreValueCount = dsh_wait_semaphore_values.size();
+			dsh_timeline_submit_info.pWaitSemaphoreValues = dsh_wait_semaphore_values.ptr();
 			dsh_timeline_submit_info.signalSemaphoreValueCount = dsh_signal_semaphore_values.size();
 			dsh_timeline_submit_info.pSignalSemaphoreValues = dsh_signal_semaphore_values.ptr();
 		}

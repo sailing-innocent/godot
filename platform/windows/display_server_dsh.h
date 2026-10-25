@@ -37,6 +37,7 @@
 
 #if defined(RD_ENABLED)
 #include "rendering_context_driver_vulkan_windows.h"
+
 #include "servers/rendering/rendering_device.h"
 #endif
 
@@ -92,6 +93,7 @@ class DisplayServerDSH : public DisplayServer {
 	DisplayServerEnums::WindowID window_id_counter = 1; // 0 is reserved for the main window.
 	int z_counter = 0; // Monotonic raise order for the godot.window.v1 z events.
 	Point2i mouse_position;
+	DisplayServerEnums::WindowID hovered_window = DisplayServerEnums::INVALID_WINDOW_ID;
 
 	// ---- interaction state owned by the DSH worker (no OS window behind us) ----
 	DisplayServerEnums::MouseMode mouse_mode = DisplayServerEnums::MOUSE_MODE_VISIBLE;

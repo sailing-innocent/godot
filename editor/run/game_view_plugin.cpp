@@ -1400,8 +1400,15 @@ void GameView::_update_arguments_for_instance(int p_idx, List<String> &r_argumen
 	}
 
 	// Add the editor window's native ID so the started game can directly set it as its parent.
-	List<String>::Element *N = r_arguments.insert_before(user_args_element, "--wid");
-	N = r_arguments.insert_after(N, itos(DisplayServer::get_singleton()->window_get_native_handle(DisplayServerEnums::WINDOW_HANDLE, get_window()->get_window_id())));
+	List<String>::Element *N = nullptr;
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+	if (DisplayServer::get_singleton()->get_name() != "dsh") {
+#endif
+		N = r_arguments.insert_before(user_args_element, "--wid");
+		N = r_arguments.insert_after(N, itos(DisplayServer::get_singleton()->window_get_native_handle(DisplayServerEnums::WINDOW_HANDLE, get_window()->get_window_id())));
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+	}
+#endif
 
 #if MACOS_ENABLED
 	N = r_arguments.insert_after(N, "--embedded");

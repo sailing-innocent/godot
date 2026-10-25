@@ -37,10 +37,11 @@
 
 #if defined(RD_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
-#include "core/input/input.h"
-#include "servers/display/native_menu.h"
 #include "dsh_viewport_worker.h"
+
+#include "core/input/input.h"
 #include "main/dsh_viewport_mode.h"
+#include "servers/display/native_menu.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 
 Vector<String> DisplayServerDSH::get_rendering_drivers_func() {
@@ -146,6 +147,18 @@ void DisplayServerDSH::_dispatch_input_event(const Ref<InputEvent> &p_event) {
 	if (from_window.is_valid() && from_window->get_window_id() != DisplayServerEnums::MAIN_WINDOW_ID) {
 		window_id = from_window->get_window_id();
 	}
+	Ref<InputEventMouse> mouse = p_event;
+	if (mouse.is_valid() && hovered_window != window_id) {
+		const WindowData *previous = windows.getptr(hovered_window);
+		if (previous && previous->window_event_callback.is_valid()) {
+			previous->window_event_callback.call(DisplayServerEnums::WINDOW_EVENT_MOUSE_EXIT);
+		}
+		hovered_window = window_id;
+		const WindowData *current = windows.getptr(window_id);
+		if (current && current->window_event_callback.is_valid()) {
+			current->window_event_callback.call(DisplayServerEnums::WINDOW_EVENT_MOUSE_ENTER);
+		}
+	}
 	const WindowData *wd = windows.getptr(window_id);
 	if (wd && wd->input_event_callback.is_valid()) {
 		wd->input_event_callback.call(p_event);
@@ -198,6 +211,7 @@ DisplayServerEnums::WindowID DisplayServerDSH::create_sub_window(DisplayServerEn
 		RenderingContextDriver::SurfaceID surface = rendering_context->surface_create_dsh(sink);
 		if (surface != 0) {
 			rendering_context->window_create_from_surface(id, surface);
+			rendering_context->window_set_size(id, (uint32_t)wd.size.width, (uint32_t)wd.size.height);
 			if (rendering_device->screen_create(id) == OK) {
 				Dictionary payload;
 				payload["window"] = (int64_t)id;
@@ -254,6 +268,12 @@ void DisplayServerDSH::delete_sub_window(DisplayServerEnums::WindowID p_id) {
 	WindowData *wd = windows.getptr(p_id);
 	if (!wd) {
 		return;
+	}
+	if (hovered_window == p_id) {
+		if (wd->window_event_callback.is_valid()) {
+			wd->window_event_callback.call(DisplayServerEnums::WINDOW_EVENT_MOUSE_EXIT);
+		}
+		hovered_window = DisplayServerEnums::INVALID_WINDOW_ID;
 	}
 #if defined(RD_ENABLED)
 	if (rendering_device) {
@@ -385,6 +405,9 @@ void DisplayServerDSH::window_set_position(const Point2i &p_position, DisplaySer
 void DisplayServerDSH::window_set_size(const Size2i p_size, DisplayServerEnums::WindowID p_window) {
 	WindowData *wd = windows.getptr(p_window);
 	ERR_FAIL_NULL(wd);
+	if (wd->size == p_size) {
+		return;
+	}
 	wd->size = p_size;
 	if (rendering_context) {
 		rendering_context->window_set_size(p_window, (uint32_t)p_size.width, (uint32_t)p_size.height);
