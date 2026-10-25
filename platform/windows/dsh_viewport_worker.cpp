@@ -76,8 +76,7 @@ void protocol_print(const String &p_line) {
 	fflush(stdout);
 }
 
-void diagnostic_print(const String &p_line) {
-	CharString utf8 = p_line.utf8();
+void diagnostic_print(const String &p_line) {	CharString utf8 = p_line.utf8();
 	MutexLock lock(stdout_mutex);
 	fwrite(utf8.ptr(), 1, utf8.length(), stderr);
 	fputc('\n', stderr);
@@ -86,6 +85,14 @@ void diagnostic_print(const String &p_line) {
 
 uint64_t steady_usec() {
 	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// TEMP DEBUG (black-screen investigation): per-frame slot ledger tracing,
+// enabled with DSH_SLOT_TRACE=1 in the environment (the broker env filter
+// passes it through to the worker).
+bool dsh_slot_trace_enabled() {
+	static const bool enabled = getenv("DSH_SLOT_TRACE") != nullptr;
+	return enabled;
 }
 } // namespace
 
@@ -471,6 +478,9 @@ void DSHViewportWorker::_pump_loop() {
 void DSHViewportWorker::_emit_frame(uint32_t p_slot) {
 	if (stop_requested.load() || current_epoch.load() < 1 || !DSHSharedFramesWin32::has_frames(frames_pool) || p_slot >= DSHSharedFramesWin32::get_slot_count(frames_pool)) {
 		return;
+	}
+	if (dsh_slot_trace_enabled()) {
+		diagnostic_print(String("[dsh-slot] emit slot=") + uitos(p_slot) + " epoch=" + uitos(current_epoch.load()) + " frame_counter=" + uitos(frame_counter.load() + 1));
 	}
 	const uint64_t frame_id = ++frame_counter;
 	const uint64_t timestamp = steady_usec();
@@ -1564,6 +1574,9 @@ uint64_t DSHViewportWorker::allocate_present(uint32_t p_slot) {
 	std::lock_guard<std::mutex> lock(sink_mutex);
 	const uint64_t value = ++next_present_value;
 	pending_presents.push_back(std::make_pair(value, p_slot));
+	if (dsh_slot_trace_enabled()) {
+		diagnostic_print(String("[dsh-slot] allocate value=") + uitos(value) + " slot=" + uitos(p_slot) + " epoch=" + uitos(current_epoch.load()) + " pending=" + uitos(pending_presents.size()));
+	}
 	return value;
 }
 
@@ -1586,6 +1599,9 @@ uint32_t DSHViewportWorker::acquire_slot_blocking() {
 		for (uint32_t i = 0; i < slot_count && i < MAX_SLOTS; i++) {
 			if (slot_free[i].load()) {
 				slot_free[i].store(false);
+				if (dsh_slot_trace_enabled()) {
+					diagnostic_print(String("[dsh-slot] acquire -> ") + uitos(i) + " epoch=" + uitos(current_epoch.load()));
+				}
 				return i;
 			}
 		}
@@ -1603,6 +1619,9 @@ uint32_t DSHViewportWorker::acquire_slot_blocking() {
 void DSHViewportWorker::mark_slot_released(uint32_t p_slot, uint64_t p_frame_id) {
 	(void)p_frame_id;
 	std::lock_guard<std::mutex> lock(sink_mutex);
+	if (dsh_slot_trace_enabled()) {
+		diagnostic_print(String("[dsh-slot] released slot=") + uitos(p_slot) + " frame=" + uitos(p_frame_id) + " epoch=" + uitos(current_epoch.load()));
+	}
 	if (p_slot < MAX_SLOTS) {
 		slot_free[p_slot].store(true);
 	}
