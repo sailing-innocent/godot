@@ -1,31 +1,31 @@
 /**************************************************************************/
 /*  display_server_dsh.h                                                  */
 /**************************************************************************/
-/*                         This file is part of:                          */
-/*                             GODOT ENGINE                               */
-/*                        https://godotengine.org                         */
+/* This file is part of: */
+/* GODOT ENGINE */
+/* https://godotengine.org */
 /**************************************************************************/
 /* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
 /* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
-/*                                                                        */
+/* */
 /* Permission is hereby granted, free of charge, to any person obtaining  */
-/* a copy of this software and associated documentation files (the        */
-/* "Software"), to deal in the Software without restriction, including    */
-/* without limitation the rights to use, copy, modify, merge, publish,    */
-/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* a copy of this software and associated documentation files (the */
+/* "Software"), to deal in the Software without restriction, including */
+/* without limitation the rights to use, copy, modify, merge, publish, */
+/* distribute, sublicense, and/or sell copies of the Software, and to */
 /* permit persons to whom the Software is furnished to do so, subject to  */
-/* the following conditions:                                              */
-/*                                                                        */
-/* The above copyright notice and this permission notice shall be         */
-/* included in all copies or substantial portions of the Software.        */
-/*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* the following conditions: */
+/* */
+/* The above copyright notice and this permission notice shall be */
+/* included in all copies or substantial portions of the Software. */
+/* */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
 /**************************************************************************/
 
 #pragma once
@@ -45,10 +45,14 @@ class DSHViewportWorker;
 class NativeMenu;
 
 // Headless display server for the DSH (DeepSeek Harness) native viewport
-// worker. There is no OS window: the main window is a virtual rectangle whose
+// worker. There is no OS window: every window is a virtual rectangle whose
 // "swapchain" is a ring of D3D11 shared textures exported to the DSH broker
 // through wire protocol 2 (owned by DSHViewportWorker). Rendering keeps using
 // the full Vulkan RenderingDevice path; only presentation is redirected.
+//
+// Protocol v2.1 (multi-window): FEATURE_SUBWINDOWS is real. Every sub-window
+// gets its own headless surface, its own per-window frame ring and its own
+// godot.window.v1 lifecycle/geometry events; the client composites layers.
 class DisplayServerDSH : public DisplayServer {
 	GDSOFTCLASS(DisplayServerDSH, DisplayServer);
 
@@ -67,24 +71,33 @@ class DisplayServerDSH : public DisplayServer {
 		bool focused = false;
 		bool minimized = false;
 		DisplayServerEnums::WindowMode mode = DisplayServerEnums::WINDOW_MODE_WINDOWED;
+		uint32_t flags = 0;
+		String title;
+		int z_order = 0;
+		DisplayServerEnums::WindowID transient_parent = DisplayServerEnums::INVALID_WINDOW_ID;
 		Callable input_event_callback;
 		Callable rect_changed_callback;
+		Callable window_event_callback;
+		Callable drop_files_callback;
 		ObjectID instance_id;
+		// Per-window IME surface (protocol v2.1): composition state is scoped to
+		// the window owning the caret.
+		bool ime_active = false;
+		Point2i ime_position;
+		String ime_preedit_text;
+		Vector2i ime_preedit_selection; // Caret/selection range inside the preedit string.
 	};
 
 	HashMap<DisplayServerEnums::WindowID, WindowData> windows;
 	DisplayServerEnums::WindowID window_id_counter = 1; // 0 is reserved for the main window.
+	int z_counter = 0; // Monotonic raise order for the godot.window.v1 z events.
 	Point2i mouse_position;
 
 	// ---- interaction state owned by the DSH worker (no OS window behind us) ----
 	DisplayServerEnums::MouseMode mouse_mode = DisplayServerEnums::MOUSE_MODE_VISIBLE;
 	bool relative_mouse_mode = false; // godot.viewport.v1 setRelativeMouseMode.
 	float content_scale = 1.0; // Physical px per logical (CSS) px; locked with each resize, Godot screen-scale semantics.
-	bool ime_active = false;
-	Point2i ime_position;
-	Callable drop_files_callback;
-	String ime_preedit_text;
-	Vector2i ime_preedit_selection; // Caret/selection range inside the preedit string.
+	String clipboard_cache; // Client-mirrored clipboard (godot.viewport.v1 clipboard bridge).
 
 #if defined(RD_ENABLED)
 	RenderingContextDriverVulkanWindows *rendering_context = nullptr;
@@ -93,8 +106,10 @@ class DisplayServerDSH : public DisplayServer {
 	DSHViewportWorker *worker = nullptr;
 	NativeMenu *native_menu = nullptr; // The editor queries NativeMenu::get_singleton() unconditionally.
 
+	void _emit_window_rect(DisplayServerEnums::WindowID p_window);
+
 public:
-	bool has_feature(DisplayServerEnums::Feature p_feature) const override { return false; }
+	bool has_feature(DisplayServerEnums::Feature p_feature) const override;
 	String get_name() const override { return "dsh"; }
 
 	int get_screen_count() const override { return 1; }
@@ -115,24 +130,20 @@ public:
 	void show_window(DisplayServerEnums::WindowID p_id) override;
 	void delete_sub_window(DisplayServerEnums::WindowID p_id) override;
 
-	DisplayServerEnums::WindowID get_window_at_screen_position(const Point2i &p_position) const override { return DisplayServerEnums::MAIN_WINDOW_ID; }
+	DisplayServerEnums::WindowID get_window_at_screen_position(const Point2i &p_position) const override;
 
 	void window_attach_instance_id(ObjectID p_instance, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	ObjectID window_get_attached_instance_id(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 
 	void window_set_rect_changed_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
-	void window_set_window_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	void window_set_window_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	void window_set_input_event_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
-	void window_set_input_text_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override { drop_files_callback = p_callable; }
+	void window_set_input_text_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+	void window_set_drop_files_callback(const Callable &p_callable, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	// Delivers an OS file drop into the engine (Window::files_dropped chain).
-	void dsh_dispatch_drop_files(const Vector<String> &p_files) {
-		if (drop_files_callback.is_valid()) {
-			drop_files_callback.call(p_files);
-		}
-	}
+	void dsh_dispatch_drop_files(const Vector<String> &p_files, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID);
 
-	void window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	void window_set_title(const String &p_title, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 
 	void window_set_mouse_passthrough(const Vector<Vector2> &p_region, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 
@@ -143,7 +154,7 @@ public:
 	Point2i window_get_position_with_decorations(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return window_get_position(p_window); }
 	void window_set_position(const Point2i &p_position, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 
-	void window_set_transient(DisplayServerEnums::WindowID p_window, DisplayServerEnums::WindowID p_parent) override {}
+	void window_set_transient(DisplayServerEnums::WindowID p_window, DisplayServerEnums::WindowID p_parent) override;
 
 	void window_set_max_size(const Size2i p_size, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	Size2i window_get_max_size(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return Size2i(); }
@@ -162,26 +173,28 @@ public:
 
 	bool window_is_maximize_allowed(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return false; }
 
-	void window_set_flag(DisplayServerEnums::WindowFlags p_flag, bool p_enabled, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	bool window_get_flag(DisplayServerEnums::WindowFlags p_flag, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return false; }
+	void window_set_flag(DisplayServerEnums::WindowFlags p_flag, bool p_enabled, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
+	bool window_get_flag(DisplayServerEnums::WindowFlags p_flag, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 
 	void window_request_attention(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	void window_set_taskbar_progress_value(float p_value, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	void window_set_taskbar_progress_state(DisplayServerEnums::ProgressState p_state, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	void window_move_to_foreground(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
+	void window_move_to_foreground(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	bool window_is_focused(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 
 	bool window_can_draw(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
 	bool can_any_window_draw() const override;
+
+	bool is_window_transparency_available() const override { return true; } // RGBA8 carries alpha; the client composites (protocol v2.1).
 
 	void window_set_ime_active(const bool p_active, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	void window_set_ime_position(const Point2i &p_pos, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
 	void window_set_ime_rect(const Rect2i &p_rect, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	// Forwards the current IME state to the client (imeState extension event),
 	// so it can host a hidden editable element at the exact caret position.
-	void dsh_notify_ime_changed();
-	String ime_get_text() const override { return ime_preedit_text; }
-	Point2i ime_get_selection() const override { return ime_preedit_selection; }
+	void dsh_notify_ime_changed(DisplayServerEnums::WindowID p_window);
+	String ime_get_text() const override;
+	Point2i ime_get_selection() const override;
 
 	int64_t window_get_native_handle(DisplayServerEnums::HandleType p_handle_type, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return 0; }
 
@@ -205,8 +218,8 @@ public:
 	void mouse_set_mode_override_enabled(bool p_override_enabled) override {}
 	DisplayServerEnums::MouseMode mouse_get_mode() const override { return mouse_mode; }
 	Point2i mouse_get_position() const override { return mouse_position; }
-	void clipboard_set(const String &p_text) override {}
-	String clipboard_get() const override { return String(); }
+	void clipboard_set(const String &p_text) override;
+	String clipboard_get() const override;
 	void clipboard_set_primary(const String &p_text) override {}
 	String clipboard_get_primary() const override { return String(); }
 
@@ -240,14 +253,28 @@ public:
 	bool dsh_is_relative_mouse_mode() const { return relative_mouse_mode; }
 	void dsh_set_content_scale(float p_scale) { content_scale = CLAMP(p_scale, 0.25f, 8.0f); }
 	float dsh_get_content_scale() const { return content_scale; }
-	void dsh_set_ime_preedit(const String &p_text, int p_cursor_start, int p_cursor_end) {
-		ime_preedit_text = p_text;
+	void dsh_set_ime_preedit(const String &p_text, int p_cursor_start, int p_cursor_end, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) {
+		WindowData *wd = windows.getptr(p_window);
+		if (!wd) {
+			wd = windows.getptr(DisplayServerEnums::MAIN_WINDOW_ID);
+		}
+		if (!wd) {
+			return;
+		}
+		wd->ime_preedit_text = p_text;
 		const int length = p_text.length();
 		// Selection range as (caret, length) like the IMM-driven display servers.
 		const int caret = CLAMP(p_cursor_start, 0, length);
 		const int end = p_cursor_end > caret ? CLAMP(p_cursor_end, caret, length) : length;
-		ime_preedit_selection = Vector2i(caret, end - caret);
+		wd->ime_preedit_selection = Vector2i(caret, end - caret);
 	}
+
+	// Focus orchestration (protocol v2.1): the worker's focus control and
+	// engine-internal grabs both funnel through here so the FOCUS_IN/OUT window
+	// event sequence has a single source of truth.
+	void dsh_apply_window_focus(uint32_t p_window); // UINT32_MAX = no focused window.
+	void dsh_notify_engine_focus(uint32_t p_window); // Engine grabbed focus internally (e.g. popup shown).
+	void dsh_set_clipboard_text(const String &p_text) { clipboard_cache = p_text; }
 
 	static void register_dsh_driver();
 

@@ -42,6 +42,7 @@
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/gui/color_rect.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/resources/3d/primitive_meshes.h"
@@ -59,6 +60,8 @@
 
 const char *DSHViewportWorker::EXTENSION_NAMESPACE = "godot.demo.v1";
 const char *DSHViewportWorker::VIEWPORT_NAMESPACE = "godot.viewport.v1";
+const char *DSHViewportWorker::WINDOW_NAMESPACE = "godot.window.v1";
+const char *DSHViewportWorker::EDITOR_NAMESPACE = "godot.editor.v1";
 DSHViewportWorker *DSHViewportWorker::singleton = nullptr;
 
 namespace {
@@ -298,7 +301,21 @@ DSHViewportWorker::~DSHViewportWorker() {
 		vkDestroySemaphore(vk_device, completion_semaphore, nullptr);
 		completion_semaphore = VK_NULL_HANDLE;
 	}
-	frames.finalize();
+	{
+		// Sub-window sinks must release their pools before the factory closes.
+		std::lock_guard<std::mutex> lock(sinks_mutex);
+		for (KeyValue<uint32_t, SubWindowState> &kv : sub_windows) {
+			if (kv.value.sink) {
+				kv.value.sink->shutdown();
+				memdelete(kv.value.sink);
+				kv.value.sink = nullptr;
+			}
+		}
+		sub_windows.clear();
+		active_sinks.clear();
+	}
+	frames_factory.destroy_frames(frames_pool);
+	frames_factory.finalize();
 	singleton = nullptr;
 }
 
@@ -343,8 +360,17 @@ void DSHViewportWorker::_stdin_loop() {
 				const uint64_t release_epoch = message.get("epoch", 0);
 				const uint32_t slot = message.get("slot", UINT32_MAX);
 				const uint64_t frame = message.get("frameId", 0);
-				if (release_epoch == current_epoch.load()) {
-					mark_slot_released(slot, frame);
+				const uint32_t window = message.get("window", 0);
+				if (window == 0) {
+					if (release_epoch == current_epoch.load()) {
+						mark_slot_released(slot, frame);
+					}
+				} else {
+					std::lock_guard<std::mutex> lock(sinks_mutex);
+					const SubWindowState *sw = sub_windows.getptr(window);
+					if (sw && sw->sink && release_epoch == sw->sink->get_epoch()) {
+						sw->sink->mark_slot_released(slot, frame);
+					}
 				}
 				continue;
 			}
@@ -359,64 +385,132 @@ void DSHViewportWorker::_stdin_loop() {
 void DSHViewportWorker::_pump_loop() {
 	uint64_t last_waited_value = 0;
 	while (!pump_exit.load()) {
-		std::pair<uint64_t, uint32_t> present;
+		bool progressed = false;
+
+		// ---- sub-windows: surface receipts lead their frames ----
+		LocalVector<std::pair<uint32_t, DSHWindowSink *>> round;
+		{
+			std::lock_guard<std::mutex> lock(sinks_mutex);
+			for (uint32_t i = 0; i < active_sinks.size(); i++) {
+				round.push_back(active_sinks[i]);
+			}
+		}
+		for (uint32_t i = 0; i < round.size(); i++) {
+			DSHWindowSink *sink = round[i].second;
+			const uint32_t window = round[i].first;
+			if (sink->get_epoch() != sink->get_published_epoch()) {
+				// Announce the new ring before any frame of this epoch can be
+				// emitted (the broker rejects frames for unannounced windows).
+				protocol_print(String("{\"type\":\"surface\",\"epoch\":") + uitos(sink->get_epoch())
+						+ ",\"width\":" + uitos(sink->get_width()) + ",\"height\":" + uitos(sink->get_height())
+						+ ",\"slots\":" + uitos(sink->get_slot_count()) + ",\"window\":" + uitos(window) + "}");
+				sink->mark_epoch_published(sink->get_epoch());
+				progressed = true;
+			}
+			uint32_t slot;
+			while (sink->pop_completed(slot)) {
+				// Transient 0-sized rings (engine window setup) must not produce
+				// broker-visible frames: release the slot instead of offering a
+				// zero-handle frame the broker would reject.
+				if (slot >= sink->get_slot_count() || sink->get_width() == 0 || sink->get_height() == 0
+						|| sink->get_slot_nt_handle(slot) == 0) {
+					sink->mark_slot_released(slot, 0);
+				} else {
+					_emit_window_frame(window, sink, slot);
+				}
+				progressed = true;
+			}
+		}
+
+		// ---- main window ----
 		{
 			std::unique_lock<std::mutex> lock(sink_mutex);
-			if (pending_presents.empty()) {
-				sink_cv.wait_for(lock, std::chrono::milliseconds(50));
-				continue;
+			if (!pending_presents.empty()) {
+				const std::pair<uint64_t, uint32_t> present = pending_presents.front();
+				lock.unlock();
+				if (present.first <= last_waited_value) {
+					// Defensive: values are strictly increasing; never wait backwards.
+					std::lock_guard<std::mutex> relock(sink_mutex);
+					if (!pending_presents.empty() && pending_presents.front().first == present.first) {
+						pending_presents.pop_front();
+					}
+					sink_cv.notify_all();
+					progressed = true;
+				} else if (current_epoch.load() >= 1 && DSHSharedFramesWin32::has_frames(frames_pool)) {
+					VkSemaphoreWaitInfo wait_info{};
+					wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+					wait_info.semaphoreCount = 1;
+					wait_info.pSemaphores = &completion_semaphore;
+					wait_info.pValues = &present.first;
+					VkResult err = vkWaitSemaphores(vk_device, &wait_info, 0);
+					if (err == VK_SUCCESS) {
+						last_waited_value = present.first;
+						{
+							std::lock_guard<std::mutex> relock(sink_mutex);
+							if (!pending_presents.empty() && pending_presents.front().first == present.first) {
+								pending_presents.pop_front();
+							}
+						}
+						sink_cv.notify_all();
+						// Same degenerate-ring guard as the sub-window path: the
+						// engine can briefly resize a window to 0x0 during setup.
+						if (present.second >= DSHSharedFramesWin32::get_slot_count(frames_pool)
+								|| DSHSharedFramesWin32::get_width(frames_pool) == 0
+								|| DSHSharedFramesWin32::get_height(frames_pool) == 0
+								|| DSHSharedFramesWin32::get_slot_nt_handle(frames_pool, present.second) == 0) {
+							mark_slot_released(present.second, 0);
+						} else {
+							_emit_frame(present.second);
+						}
+						progressed = true;
+					} else if (err != VK_TIMEOUT) {
+						diagnostic_print(String("DSH viewport: frame completion wait failed (VkResult ") + itos(err) + ").");
+						fatal_error.store(true);
+						return;
+					}
+				}
 			}
-			present = pending_presents.front();
 		}
-		if (present.first <= last_waited_value) {
-			// Defensive: values are strictly increasing; never wait backwards.
-			std::lock_guard<std::mutex> lock(sink_mutex);
-			if (!pending_presents.empty() && pending_presents.front().first == present.first) {
-				pending_presents.pop_front();
-			}
-			sink_cv.notify_all();
-			continue;
+
+		if (!progressed) {
+			std::unique_lock<std::mutex> lock(sink_mutex);
+			sink_cv.wait_for(lock, std::chrono::milliseconds(2));
 		}
-		VkSemaphoreWaitInfo wait_info{};
-		wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		wait_info.semaphoreCount = 1;
-		wait_info.pSemaphores = &completion_semaphore;
-		wait_info.pValues = &present.first;
-		VkResult err = vkWaitSemaphores(vk_device, &wait_info, 2ULL * 1000 * 1000 * 1000); // 2 s timeout, then retry.
-		if (err == VK_TIMEOUT) {
-			continue;
-		}
-		if (err != VK_SUCCESS) {
-			diagnostic_print(String("DSH viewport: frame completion wait failed (VkResult ") + itos(err) + ").");
-			fatal_error.store(true);
-			return;
-		}
-		last_waited_value = present.first;
-		{
-			std::lock_guard<std::mutex> lock(sink_mutex);
-			if (!pending_presents.empty() && pending_presents.front().first == present.first) {
-				pending_presents.pop_front();
-			}
-			sink_cv.notify_all();
-		}
-		_emit_frame(present.second);
 	}
 }
 
 void DSHViewportWorker::_emit_frame(uint32_t p_slot) {
-	if (stop_requested.load() || current_epoch.load() < 1 || !frames.has_frames() || p_slot >= frames.get_slot_count()) {
+	if (stop_requested.load() || current_epoch.load() < 1 || !DSHSharedFramesWin32::has_frames(frames_pool) || p_slot >= DSHSharedFramesWin32::get_slot_count(frames_pool)) {
 		return;
 	}
 	const uint64_t frame_id = ++frame_counter;
 	const uint64_t timestamp = steady_usec();
-	const uint64_t handle = frames.get_slot_nt_handle(p_slot);
+	const uint64_t handle = DSHSharedFramesWin32::get_slot_nt_handle(frames_pool, p_slot);
 	char line[512];
 	snprintf(line, sizeof(line),
 			"{\"type\":\"frame\",\"epoch\":%llu,\"slot\":%u,\"frameId\":%llu,"
 			"\"width\":%u,\"height\":%u,\"inputSeq\":%llu,\"timestampUs\":%llu,\"handle\":\"%llu\"}",
 			(unsigned long long)current_epoch.load(), p_slot, (unsigned long long)frame_id,
-			(unsigned)frames.get_width(), (unsigned)frames.get_height(),
+			(unsigned)DSHSharedFramesWin32::get_width(frames_pool), (unsigned)DSHSharedFramesWin32::get_height(frames_pool),
 			(unsigned long long)last_input_seq.load(), (unsigned long long)timestamp, (unsigned long long)handle);
+	protocol_print(line);
+}
+
+void DSHViewportWorker::_emit_window_frame(uint32_t p_window, DSHWindowSink *p_sink, uint32_t p_slot) {
+	if (stop_requested.load() || p_sink == nullptr || !p_sink->has_frames() || p_slot >= p_sink->get_slot_count()) {
+		return;
+	}
+	const uint64_t frame_id = ++frame_counter;
+	const uint64_t timestamp = steady_usec();
+	const uint64_t handle = p_sink->get_slot_nt_handle(p_slot);
+	char line[560];
+	snprintf(line, sizeof(line),
+			"{\"type\":\"frame\",\"epoch\":%llu,\"slot\":%u,\"frameId\":%llu,"
+			"\"width\":%u,\"height\":%u,\"inputSeq\":%llu,\"timestampUs\":%llu,\"handle\":\"%llu\",\"window\":%u}",
+			(unsigned long long)p_sink->get_epoch(), p_slot, (unsigned long long)frame_id,
+			(unsigned)p_sink->get_width(), (unsigned)p_sink->get_height(),
+			(unsigned long long)last_input_seq.load(), (unsigned long long)timestamp, (unsigned long long)handle,
+			(unsigned)p_window);
 	protocol_print(line);
 }
 
@@ -438,8 +532,8 @@ void DSHViewportWorker::_send_hello() {
 		gpu_name = String(properties.deviceName);
 	}
 	protocol_print(String("{\"type\":\"hello\",\"protocol\":2,\"transport\":\"d3d11-nt-rgba8\",\"extensions\":[\"")
-			+ EXTENSION_NAMESPACE + "\",\"" + VIEWPORT_NAMESPACE
-			+ "\"],\"features\":[\"interaction.map.v2\",\"input.text\",\"input.ime\",\"pointer.lock\",\"input.drop\"]"
+			+ EXTENSION_NAMESPACE + "\",\"" + VIEWPORT_NAMESPACE + "\",\"" + WINDOW_NAMESPACE + "\",\"" + EDITOR_NAMESPACE
+			+ "\"],\"features\":[\"interaction.map.v2\",\"input.text\",\"input.ime\",\"pointer.lock\",\"input.drop\",\"windows.multi.v1\"]"
 			+ ",\"backend\":\"godot-vulkan\",\"vendorId\":" + uitos(vendor_id)
 			+ ",\"deviceId\":" + uitos(device_id) + ",\"gpu\":" + JSON::stringify(gpu_name)
 			+ ",\"runtimeCpuReadbacks\":0,\"exportGpuCopies\":0}");
@@ -464,6 +558,13 @@ void DSHViewportWorker::poll() {
 	}
 	_apply_pending_resize();
 
+	// Sub-window resizes requested through the protocol (protocol v2.1): the
+	// engine remains the geometry source of truth, so these are applied through
+	// the regular display-server path (which drives the surface recreation).
+	for (KeyValue<uint32_t, SubWindowState> &kv : sub_windows) {
+		_apply_sub_window_resize(kv.key);
+	}
+
 	const uint64_t now = OS::get_singleton()->get_ticks_usec();
 	if (stats_last_usec == 0) {
 		stats_last_usec = now;
@@ -473,11 +574,11 @@ void DSHViewportWorker::poll() {
 				+ ",\"inputSeq\":" + uitos(input_seq) + ",\"validationErrors\":0}");
 	}
 
-	const bool active = viewport_visible.load() && frames.has_frames() && !has_pending_resize;
+	const bool active = viewport_visible.load() && DSHSharedFramesWin32::has_frames(frames_pool) && !has_pending_resize;
 	const int target_fps = active ? 60 : 10;
 	if (Engine::get_singleton()->get_max_fps() != target_fps) {
 		fprintf(stderr, "[dsh] fps target %d->%d visible=%d has_frames=%d pending_resize=%d\n", Engine::get_singleton()->get_max_fps(), target_fps,
-				(int)viewport_visible.load(), (int)frames.has_frames(), (int)has_pending_resize);
+				(int)viewport_visible.load(), (int)DSHSharedFramesWin32::has_frames(frames_pool), (int)has_pending_resize);
 		fflush(stderr);
 		Engine::get_singleton()->set_max_fps(target_fps);
 	}
@@ -524,6 +625,29 @@ void DSHViewportWorker::_ensure_demo_scene(SceneTree *p_tree) {
 	demo_controller = controller;
 }
 
+void DSHViewportWorker::_open_demo_popup(const Dictionary &p_payload) {
+	MainLoop *main_loop = OS::get_singleton()->get_main_loop();
+	SceneTree *tree = Object::cast_to<SceneTree>(main_loop);
+	if (!tree || !tree->get_root()) {
+		diagnostic_print("DSH viewport: openPopup ignored (no scene tree).");
+		return;
+	}
+	Window *popup = memnew(Window);
+	popup->set_title("DSH Demo Popup");
+	const int width = CLAMP((int)p_payload.get("width", 240), 16, (int)MAX_VIEWPORT_DIMENSION);
+	const int height = CLAMP((int)p_payload.get("height", 160), 16, (int)MAX_VIEWPORT_DIMENSION);
+	popup->set_size(Size2i(width, height));
+	ColorRect *rect = memnew(ColorRect);
+	const String color_html = p_payload.get("color", "#336699");
+	const Color color = Color::html(color_html.is_empty() ? "#336699" : color_html);
+	rect->set_color(color);
+	rect->set_anchors_preset(Control::PRESET_FULL_RECT);
+	popup->add_child(rect);
+	tree->get_root()->add_child(popup);
+	popup->popup_centered();
+	last_demo_popup = popup->get_instance_id();
+}
+
 void DSHViewportWorker::_apply_queued_commands() {
 	LocalVector<String> batch;
 	bool eof = false;
@@ -564,8 +688,13 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 	if (kind == "resize") {
 		const uint32_t width = message.get("width", 0);
 		const uint32_t height = message.get("height", 0);
+		const uint32_t window = message.get("window", 0);
 		if (width > MAX_VIEWPORT_DIMENSION || height > MAX_VIEWPORT_DIMENSION) {
 			diagnostic_print("DSH viewport: resize beyond the 2048x2048 quota ignored.");
+			return;
+		}
+		if (window != 0 && !sub_windows.has(window)) {
+			diagnostic_print("DSH viewport: resize for an unknown window ignored.");
 			return;
 		}
 		double css_width = 0.0;
@@ -586,6 +715,15 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 				diagnostic_print("DSH viewport: resize with invalid cssWidth/cssHeight ignored (both finite, 0<x<=16384 required).");
 				return;
 			}
+		}
+		if (window != 0) {
+			// Protocol v2.1: sub-window resizes are applied per window; the
+			// session-level map factors still come from the main-window resize.
+			SubWindowState *sw = sub_windows.getptr(window);
+			sw->pending_resize_width = width;
+			sw->pending_resize_height = height;
+			sw->has_pending_resize = true;
+			return;
 		}
 		pending_resize_width = width;
 		pending_resize_height = height;
@@ -610,8 +748,16 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 		const uint64_t release_epoch = message.get("epoch", 0);
 		const uint32_t slot = message.get("slot", UINT32_MAX);
 		const uint64_t frame = message.get("frameId", 0);
-		if (release_epoch == current_epoch.load()) {
-			mark_slot_released(slot, frame);
+		const uint32_t window = message.get("window", 0);
+		if (window == 0) {
+			if (release_epoch == current_epoch.load()) {
+				mark_slot_released(slot, frame);
+			}
+		} else {
+			const SubWindowState *sw = sub_windows.getptr(window);
+			if (sw && sw->sink && release_epoch == sw->sink->get_epoch()) {
+				sw->sink->mark_slot_released(slot, frame);
+			}
 		}
 		return;
 	}
@@ -622,18 +768,20 @@ void DSHViewportWorker::_handle_command(const String &p_line) {
 		}
 		input_seq = seq;
 		last_input_seq.store(seq);
-		if (kind == "extension") {
-			const String ns = message.get("namespace", "");
-			const String name = message.get("name", "");
-			Dictionary payload = message.get("payload", Dictionary());
-			if (ns == EXTENSION_NAMESPACE) {
-				_handle_extension(name, payload);
-			} else if (ns == VIEWPORT_NAMESPACE) {
-				_handle_viewport_extension(name, payload);
+			if (kind == "extension") {
+				const String ns = message.get("namespace", "");
+				const String name = message.get("name", "");
+				Dictionary payload = message.get("payload", Dictionary());
+				if (ns == EXTENSION_NAMESPACE) {
+					_handle_extension(name, payload);
+				} else if (ns == VIEWPORT_NAMESPACE) {
+					_handle_viewport_extension(name, payload);
+				} else if (ns == EDITOR_NAMESPACE) {
+					_handle_editor_extension(name, payload);
+				} else {
+					diagnostic_print("DSH viewport: unknown extension namespace '" + ns + "'.");
+				}
 			} else {
-				diagnostic_print("DSH viewport: unknown extension namespace '" + ns + "'.");
-			}
-		} else {
 			Dictionary event = message.get("event", Dictionary());
 			_handle_input_event(event);
 		}
@@ -653,6 +801,17 @@ void DSHViewportWorker::_handle_extension(const String &p_name, const Dictionary
 		demo_controller->reset_camera();
 	} else if (p_name == "rotate") {
 		demo_controller->set_auto_rotate(p_payload.get("value", true));
+	} else if (p_name == "openPopup") {
+		// Test hook (protocol v2.1): opens a real sub-window so the fake broker
+		// can assert the whole godot.window.v1 lifecycle end to end.
+		_open_demo_popup(p_payload);
+	} else if (p_name == "closePopup") {
+		Object *object = last_demo_popup.is_valid() ? ObjectDB::get_instance(last_demo_popup) : nullptr;
+		Window *popup = Object::cast_to<Window>(object);
+		if (popup) {
+			popup->queue_free();
+			last_demo_popup = ObjectID();
+		}
 	} else if (p_name == "query") {
 		// Test hook for the fake broker (scripts/godot.mjs verify): reports the
 		// controller state as a worker extension event so coordinate mapping and
@@ -675,11 +834,109 @@ void DSHViewportWorker::_handle_extension(const String &p_name, const Dictionary
 			mouse_array.push_back(mouse.x);
 			mouse_array.push_back(mouse.y);
 			state["mouse"] = mouse_array;
+			// Multi-window report (protocol v2.1): rect/focus/visibility per window.
+			Array windows;
+			const Vector<DisplayServerEnums::WindowID> ids = display_server->get_window_list();
+			for (int i = 0; i < ids.size(); i++) {
+				Dictionary entry;
+				entry["window"] = (int64_t)ids[i];
+				const Rect2i rect(display_server->window_get_position(ids[i]), display_server->window_get_size(ids[i]));
+				Array rect_array;
+				rect_array.push_back(rect.position.x);
+				rect_array.push_back(rect.position.y);
+				rect_array.push_back(rect.size.x);
+				rect_array.push_back(rect.size.y);
+				entry["rect"] = rect_array;
+				entry["focused"] = display_server->window_is_focused(ids[i]);
+				entry["visible"] = display_server->window_can_draw(ids[i]);
+				windows.push_back(entry);
+			}
+			state["windows"] = windows;
 		}
 		_emit_extension_event("state", state);
 	} else {
 		diagnostic_print("DSH viewport: unknown extension operation '" + p_name + "'.");
 	}
+}
+
+void DSHViewportWorker::_handle_editor_extension(const String &p_name, const Dictionary &p_payload) {
+	if (p_name == "gameLifecycle") {
+		// Client -> worker lifecycle report for the spawned game session; the
+		// editor's EmbeddedProcessDSH turns it into embedding_completed/failed.
+		const bool running = (bool)p_payload.get("running", false);
+		const int64_t code = (int64_t)p_payload.get("code", 0);
+		if (game_lifecycle_listener.is_valid()) {
+			game_lifecycle_listener.call(running, code);
+		} else if (debug_game_echo) {
+			_debug_game_lifecycle(running, code); // Verify hook round trip.
+		}
+	} else if (p_name == "debugGame") {
+		// Verify-only hook (scripts/godot.mjs --editor gameTab step): drives the
+		// same emit paths EmbeddedProcessDSH uses, without a GameView play session.
+		// Never clobbers a real game session's listener.
+		const String phase = p_payload.get("phase", "");
+		const Dictionary rect_dict = p_payload.get("rect", Dictionary());
+		const Rect2i rect((int)rect_dict.get("x", 0), (int)rect_dict.get("y", 0),
+				(int)rect_dict.get("width", 320), (int)rect_dict.get("height", 240));
+		if (phase == "start") {
+			Vector<String> args;
+			args.push_back("--dsh-verify-game");
+			editor_spawn_game(args, rect);
+			debug_game_echo = true; // Echo only while no real game session owns the listener.
+		} else if (phase == "rect") {
+			editor_set_game_rect(rect);
+		} else if (phase == "stop") {
+			// The echo stays on: the client reports gameLifecycle{running:false}
+			// AFTER receiving gameClose, and the verify step asserts that final
+			// round trip. It only ever fires while no real game session owns the
+			// listener slot, and set_game_lifecycle_listener() clears it.
+			editor_close_game();
+		} else {
+			diagnostic_print("DSH viewport: unknown debugGame phase '" + phase + "'.");
+		}
+	} else {
+		diagnostic_print("DSH viewport: unknown editor operation '" + p_name + "'.");
+	}
+}
+
+void DSHViewportWorker::_debug_game_lifecycle(bool p_running, int64_t p_code) {
+	// Verify hook: makes the client -> worker gameLifecycle round trip observable
+	// on the wire as godot.editor.v1/gameDebug (no GameView UI in the loop).
+	Dictionary payload;
+	payload["running"] = p_running;
+	payload["code"] = p_code;
+	emit_editor_event("gameDebug", payload);
+}
+
+void DSHViewportWorker::editor_spawn_game(const Vector<String> &p_args, const Rect2i &p_rect) {
+	Array args;
+	for (int i = 0; i < (int)p_args.size(); i++) {
+		args.push_back(p_args[i]);
+	}
+	Dictionary rect;
+	rect["x"] = p_rect.position.x;
+	rect["y"] = p_rect.position.y;
+	rect["width"] = p_rect.size.x;
+	rect["height"] = p_rect.size.y;
+	Dictionary payload;
+	payload["args"] = args;
+	payload["rect"] = rect;
+	emit_editor_event("spawnGame", payload);
+}
+
+void DSHViewportWorker::editor_set_game_rect(const Rect2i &p_rect) {
+	Dictionary rect;
+	rect["x"] = p_rect.position.x;
+	rect["y"] = p_rect.position.y;
+	rect["width"] = p_rect.size.x;
+	rect["height"] = p_rect.size.y;
+	Dictionary payload;
+	payload["rect"] = rect;
+	emit_editor_event("gameRect", payload);
+}
+
+void DSHViewportWorker::editor_close_game() {
+	emit_editor_event("gameClose", Dictionary());
 }
 
 void DSHViewportWorker::_handle_viewport_extension(const String &p_name, const Dictionary &p_payload) {
@@ -693,18 +950,35 @@ void DSHViewportWorker::_handle_viewport_extension(const String &p_name, const D
 		if (demo_controller) {
 			demo_controller->set_right_drag_pan(mode != "none");
 		}
+	} else if (p_name == "clipboard") {
+		// Clipboard bridge (protocol v2.1): the client mirrors the system
+		// clipboard content so clipboard_get() can answer synchronously.
+		if (display_server) {
+			display_server->dsh_set_clipboard_text(p_payload.get("text", ""));
+		}
 	} else {
 		diagnostic_print("DSH viewport: unknown viewport operation '" + p_name + "'.");
 	}
 }
 
 void DSHViewportWorker::emit_viewport_extension(const String &p_name, const Dictionary &p_payload) {
-	protocol_print(String("{\"type\":\"extension\",\"namespace\":\"") + VIEWPORT_NAMESPACE + "\",\"name\":"
-			+ JSON::stringify(p_name) + ",\"payload\":" + JSON::stringify(p_payload) + "}");
+	_emit_extension_event_ns(VIEWPORT_NAMESPACE, p_name, p_payload);
+}
+
+void DSHViewportWorker::emit_window_event(const String &p_name, const Dictionary &p_payload) {
+	_emit_extension_event_ns(WINDOW_NAMESPACE, p_name, p_payload);
+}
+
+void DSHViewportWorker::emit_editor_event(const String &p_name, const Dictionary &p_payload) {
+	_emit_extension_event_ns(EDITOR_NAMESPACE, p_name, p_payload);
 }
 
 void DSHViewportWorker::_emit_extension_event(const String &p_name, const Dictionary &p_payload) {
-	protocol_print(String("{\"type\":\"extension\",\"namespace\":\"") + EXTENSION_NAMESPACE + "\",\"name\":"
+	_emit_extension_event_ns(EXTENSION_NAMESPACE, p_name, p_payload);
+}
+
+void DSHViewportWorker::_emit_extension_event_ns(const String &p_ns, const String &p_name, const Dictionary &p_payload) {
+	protocol_print(String("{\"type\":\"extension\",\"namespace\":\"") + p_ns + "\",\"name\":"
 			+ JSON::stringify(p_name) + ",\"payload\":" + JSON::stringify(p_payload) + "}");
 }
 
@@ -759,25 +1033,50 @@ void DSHViewportWorker::_apply_focus(bool p_focused) {
 void DSHViewportWorker::_handle_input_event(const Dictionary &p_event) {
 	const String type = p_event.get("type", "");
 	if (type == "pointer") {
-		_inject_pointer(p_event);
+		_inject_pointer(p_event, _event_window(p_event));
 	} else if (type == "wheel") {
-		_inject_wheel(p_event);
+		_inject_wheel(p_event, _event_window(p_event));
 	} else if (type == "key") {
-		_inject_key(p_event);
+		_inject_key(p_event, _event_window(p_event));
 	} else if (type == "text") {
-		_inject_text(p_event);
+		_inject_text(p_event, _event_window(p_event));
 	} else if (type == "ime") {
-		_inject_ime(p_event);
+		_inject_ime(p_event, _event_window(p_event));
 	} else if (type == "drop") {
-		_inject_drop(p_event);
+		_inject_drop(p_event, _event_window(p_event));
 	} else if (type == "focus") {
-		_apply_focus(p_event.get("focused", true));
+		const bool focused = p_event.get("focused", true);
+		if (p_event.has("window") && !focused) {
+			const uint32_t window = p_event.get("window", 0);
+			if (window == focused_window) {
+				dsh_set_focused_window(UINT32_MAX);
+			}
+			return;
+		}
+		_apply_focus(focused);
+		if (focused) {
+			const uint32_t window = p_event.get("window", focused_window);
+			dsh_set_focused_window(window);
+		} else {
+			dsh_set_focused_window(UINT32_MAX);
+		}
 	} else {
 		diagnostic_print("DSH viewport: unknown input event type '" + type + "'.");
 	}
 }
 
-void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
+uint32_t DSHViewportWorker::_event_window(const Dictionary &p_event) const {
+	if (!p_event.has("window")) {
+		return focused_window;
+	}
+	const uint32_t window = p_event.get("window", 0);
+	if (window >= MAX_WINDOWS || (window != 0 && !sub_windows.has(window))) {
+		return focused_window;
+	}
+	return window;
+}
+
+void DSHViewportWorker::_inject_pointer(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	const String phase = p_event.get("phase", "move");
 	// A cancel never carries a usable button value: release everything up front
 	// (same path as a focus loss) instead of bailing out on button == NONE.
@@ -791,16 +1090,23 @@ void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 	const uint32_t modifiers = p_event.get("modifiers", 0);
 	// interaction.map.v2: the protocol position is viewport-local CSS px; the
 	// engine window is physical px. Factors were locked when the current epoch's
-	// resize was applied.
+	// resize was applied. Protocol v2.1: the session-level factors map every
+	// window's layer-local coordinates (window positions are engine-driven).
 	const Vector2 position = _map_css_to_engine(x, y);
 	if (display_server) {
-		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
+		// The global mouse position tracks the virtual screen: layer-local point
+		// plus the owning window's engine position.
+		Point2i origin;
+		if (p_window != DisplayServerEnums::MAIN_WINDOW_ID) {
+			origin = display_server->window_get_position(p_window);
+		}
+		display_server->dsh_set_mouse_position(origin + Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
 	}
 
 	if (phase == "move") {
 		Ref<InputEventMouseMotion> motion;
 		motion.instantiate();
-		motion->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+		motion->set_window_id(p_window);
 		motion->set_position(position);
 		motion->set_global_position(position);
 		motion->set_button_mask((MouseButtonMask)buttons);
@@ -842,7 +1148,7 @@ void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 	const bool pressed = (phase == "down");
 	Ref<InputEventMouseButton> event;
 	event.instantiate();
-	event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+	event->set_window_id(p_window);
 	event->set_button_index(button);
 	event->set_pressed(pressed);
 	event->set_position(position);
@@ -855,7 +1161,7 @@ void DSHViewportWorker::_inject_pointer(const Dictionary &p_event) {
 	Input::get_singleton()->parse_input_event(event);
 }
 
-void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
+void DSHViewportWorker::_inject_wheel(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	const double delta_x = p_event.get("deltaX", 0.0);
 	const double delta_y = p_event.get("deltaY", 0.0);
 	const double dominant = Math::abs(delta_y) >= Math::abs(delta_x) ? delta_y : delta_x;
@@ -864,9 +1170,9 @@ void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
 	}
 	Ref<InputEventMouseButton> event;
 	event.instantiate();
-	event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+	event->set_window_id(p_window);
 	event->set_button_index(dominant > 0 ? (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_DOWN : MouseButton::WHEEL_RIGHT)
-									 : (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_UP : MouseButton::WHEEL_LEFT));
+										 : (Math::abs(delta_y) >= Math::abs(delta_x) ? MouseButton::WHEEL_UP : MouseButton::WHEEL_LEFT));
 	event->set_factor(CLAMP(Math::abs(dominant) / 100.0, 0.1, 10.0));
 	// Use the coordinates carried by the event itself (mapped CSS -> physical);
 	// the wheel may sit far away from the last pointer position.
@@ -874,7 +1180,11 @@ void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
 	event->set_position(position);
 	event->set_global_position(position);
 	if (display_server) {
-		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
+		Point2i origin;
+		if (p_window != DisplayServerEnums::MAIN_WINDOW_ID) {
+			origin = display_server->window_get_position(p_window);
+		}
+		display_server->dsh_set_mouse_position(origin + Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
 	}
 
 	event->set_pressed(true);
@@ -884,7 +1194,7 @@ void DSHViewportWorker::_inject_wheel(const Dictionary &p_event) {
 	Input::get_singleton()->parse_input_event(release);
 }
 
-void DSHViewportWorker::_inject_text(const Dictionary &p_event) {
+void DSHViewportWorker::_inject_text(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	const String text = p_event.get("text", "");
 	if (text.is_empty()) {
 		return;
@@ -897,7 +1207,7 @@ void DSHViewportWorker::_inject_text(const Dictionary &p_event) {
 		const char32_t codepoint = text[i];
 		Ref<InputEventKey> event;
 		event.instantiate();
-		event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+		event->set_window_id(p_window);
 		event->set_pressed(true);
 		event->set_echo(false);
 		if (codepoint == '\n' || codepoint == '\r') {
@@ -920,7 +1230,7 @@ void DSHViewportWorker::_inject_text(const Dictionary &p_event) {
 	}
 }
 
-void DSHViewportWorker::_inject_ime(const Dictionary &p_event) {
+void DSHViewportWorker::_inject_ime(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	if (!display_server) {
 		return;
 	}
@@ -930,17 +1240,17 @@ void DSHViewportWorker::_inject_ime(const Dictionary &p_event) {
 		// Preedit surface: the client reports in-progress composition; LineEdit
 		// and TextEdit re-query ime_get_text()/ime_get_selection() when the
 		// NOTIFICATION_OS_IME_UPDATE propagation reaches them.
-		display_server->dsh_set_ime_preedit(text, p_event.get("cursorStart", 0), p_event.get("cursorEnd", 0));
+		display_server->dsh_set_ime_preedit(text, p_event.get("cursorStart", 0), p_event.get("cursorEnd", 0), p_window);
 	} else if (state == "commit") {
-		display_server->dsh_set_ime_preedit(String(), 0, 0);
+		display_server->dsh_set_ime_preedit(String(), 0, 0, p_window);
 		if (!text.is_empty()) {
 			Dictionary commit;
 			commit["type"] = "text";
 			commit["text"] = text;
-			_inject_text(commit);
+			_inject_text(commit, p_window);
 		}
 	} else if (state == "cancel") {
-		display_server->dsh_set_ime_preedit(String(), 0, 0);
+		display_server->dsh_set_ime_preedit(String(), 0, 0, p_window);
 	} else {
 		diagnostic_print("DSH viewport: unknown ime state '" + state + "'.");
 		return;
@@ -951,7 +1261,7 @@ void DSHViewportWorker::_inject_ime(const Dictionary &p_event) {
 	}
 }
 
-void DSHViewportWorker::_inject_drop(const Dictionary &p_event) {
+void DSHViewportWorker::_inject_drop(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	// The editor resolves the drop target from the current mouse position, so
 	// land a motion event at the drop point first (same contract as a real OS,
 	// where the drag cursor is there when the button releases).
@@ -959,11 +1269,15 @@ void DSHViewportWorker::_inject_drop(const Dictionary &p_event) {
 	const double y = p_event.get("y", 0.0);
 	const Vector2 position = _map_css_to_engine(x, y);
 	if (display_server) {
-		display_server->dsh_set_mouse_position(Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
+		Point2i origin;
+		if (p_window != DisplayServerEnums::MAIN_WINDOW_ID) {
+			origin = display_server->window_get_position(p_window);
+		}
+		display_server->dsh_set_mouse_position(origin + Point2i((int)Math::round(position.x), (int)Math::round(position.y)));
 	}
 	Ref<InputEventMouseMotion> motion;
 	motion.instantiate();
-	motion->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+	motion->set_window_id(p_window);
 	motion->set_position(position);
 	motion->set_global_position(position);
 	motion->set_button_mask(MouseButtonMask::NONE);
@@ -985,11 +1299,11 @@ void DSHViewportWorker::_inject_drop(const Dictionary &p_event) {
 		last_drop_paths.push_back(paths[i]);
 	}
 	if (display_server) {
-		display_server->dsh_dispatch_drop_files(paths);
+		display_server->dsh_dispatch_drop_files(paths, p_window);
 	}
 }
 
-void DSHViewportWorker::_inject_key(const Dictionary &p_event) {
+void DSHViewportWorker::_inject_key(const Dictionary &p_event, DisplayServerEnums::WindowID p_window) {
 	const String code = p_event.get("code", "");
 	const CharString code_utf8 = code.utf8();
 	Key key = dom_code2godot_scancode(code_utf8.get_data(), code_utf8.get_data(), true);
@@ -1005,7 +1319,7 @@ void DSHViewportWorker::_inject_key(const Dictionary &p_event) {
 	const String key_text = p_event.get("key", "");
 	Ref<InputEventKey> event;
 	event.instantiate();
-	event->set_window_id(DisplayServerEnums::MAIN_WINDOW_ID);
+	event->set_window_id(p_window);
 	event->set_pressed(down);
 	if (key_text.length() == 1) {
 		event->set_unicode(key_text[0]);
@@ -1059,9 +1373,9 @@ void DSHViewportWorker::_apply_pending_resize() {
 	}
 	if (display_server) {
 		// Content scale follows Godot semantics (physical px per logical unit):
-	// our window coordinates are physical, so the logical (css) size is
-	// physical / map_scale_x.
-	display_server->dsh_set_content_scale(CLAMP(map_scale_x, 0.25, 8.0));
+		// our window coordinates are physical, so the logical (css) size is
+		// physical / map_scale_x.
+		display_server->dsh_set_content_scale(CLAMP(map_scale_x, 0.25, 8.0));
 	}
 	String surface_line = String("{\"type\":\"surface\",\"epoch\":") + uitos(new_epoch)
 			+ ",\"width\":" + uitos(width) + ",\"height\":" + uitos(height)
@@ -1075,7 +1389,111 @@ void DSHViewportWorker::_apply_pending_resize() {
 	display_server->window_set_size(Size2i((int)width, (int)height), DisplayServerEnums::MAIN_WINDOW_ID);
 }
 
-/**** Frame sink implementation ****/
+void DSHViewportWorker::_apply_sub_window_resize(uint32_t p_window) {
+	SubWindowState *sw = sub_windows.getptr(p_window);
+	if (!sw || !sw->has_pending_resize || stop_requested.load()) {
+		return;
+	}
+	if (sw->sink == nullptr || !sw->sink->are_all_slots_free()) {
+		return; // Apply once the broker returned every lease of this ring.
+	}
+	const uint32_t width = sw->pending_resize_width;
+	const uint32_t height = sw->pending_resize_height;
+	sw->has_pending_resize = false;
+	if (width == 0 || height == 0) {
+		return; // Zero size suspends the sub-window without touching the ring.
+	}
+	display_server->window_set_size(Size2i((int)width, (int)height), (DisplayServerEnums::WindowID)p_window);
+}
+
+/**** Multi-window registry (protocol v2.1) ****/
+
+DSHWindowSink *DSHViewportWorker::dsh_create_window_sink(uint32_t p_window) {
+	ERR_FAIL_COND_V_MSG(p_window == 0 || p_window >= MAX_WINDOWS, nullptr, "DSH viewport: sub-window id out of range.");
+	std::lock_guard<std::mutex> lock(sinks_mutex);
+	ERR_FAIL_COND_V_MSG(sub_windows.has(p_window), nullptr, "DSH viewport: duplicate sub-window id.");
+	SubWindowState state;
+	state.sink = memnew(DSHWindowSink);
+	// The factory initializes lazily inside the first create_frames(); the
+	// broker PID is needed for that first import.
+	state.sink->set_factory(&frames_factory);
+	state.sink->set_broker_pid(broker_pid);
+	sub_windows.insert(p_window, state);
+	active_sinks.push_back(std::make_pair(p_window, state.sink));
+	return state.sink;
+}
+
+void DSHViewportWorker::dsh_destroy_window_sink(uint32_t p_window) {
+	DSHWindowSink *sink = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(sinks_mutex);
+		SubWindowState *sw = sub_windows.getptr(p_window);
+		if (!sw) {
+			return;
+		}
+		sink = sw->sink;
+		sw->sink = nullptr;
+		for (uint32_t i = 0; i < active_sinks.size(); i++) {
+			if (active_sinks[i].first == p_window) {
+				active_sinks.remove_at(i);
+				break;
+			}
+		}
+		sub_windows.erase(p_window);
+	}
+	if (sink) {
+		sink->shutdown();
+		memdelete(sink);
+	}
+}
+
+void DSHViewportWorker::dsh_set_focused_window(uint32_t p_window) {
+	if (p_window != UINT32_MAX && p_window >= MAX_WINDOWS) {
+		return;
+	}
+	const uint32_t previous = focused_window;
+	if (previous == p_window) {
+		return;
+	}
+	focused_window = p_window;
+	if (display_server) {
+		display_server->dsh_apply_window_focus(p_window);
+	}
+	if (previous != UINT32_MAX) {
+		Dictionary payload;
+		payload["window"] = (int64_t)previous;
+		payload["focused"] = false;
+		emit_window_event("focus", payload);
+	}
+	if (p_window != UINT32_MAX) {
+		Dictionary payload;
+		payload["window"] = (int64_t)p_window;
+		payload["focused"] = true;
+		emit_window_event("focus", payload);
+	}
+}
+
+void DSHViewportWorker::dsh_notify_engine_focus(uint32_t p_window, bool p_focused) {
+	// Engine-internal focus change (e.g. a popup grabbing focus on show): keep
+	// the client layers aligned. The engine already fired its own callbacks.
+	if (p_focused) {
+		if (focused_window != p_window) {
+			focused_window = p_window;
+			Dictionary payload;
+			payload["window"] = (int64_t)p_window;
+			payload["focused"] = true;
+			emit_window_event("focus", payload);
+		}
+	} else if (focused_window == p_window) {
+		focused_window = UINT32_MAX;
+		Dictionary payload;
+		payload["window"] = (int64_t)p_window;
+		payload["focused"] = false;
+		emit_window_event("focus", payload);
+	}
+}
+
+/**** Frame sink implementation (main window) ****/
 
 Error DSHViewportWorker::create_frames(VkPhysicalDevice p_physical_device, VkDevice p_device, uint32_t p_graphics_queue_family, uint32_t p_width, uint32_t p_height, uint32_t p_slot_count) {
 	vk_device = p_device;
@@ -1092,16 +1510,29 @@ Error DSHViewportWorker::create_frames(VkPhysicalDevice p_physical_device, VkDev
 
 	const bool first_init = !frames_pool_ready;
 	if (first_init) {
-		Error init_err = frames.initialize(p_physical_device, p_device, broker_pid);
+		Error init_err = frames_factory.initialize(p_physical_device, p_device, broker_pid);
 		ERR_FAIL_COND_V_MSG(init_err != OK, init_err, "DSH viewport: D3D11 initialization failed.");
 		frames_pool_ready = true;
 	}
 
-	Error err = frames.create_frames(p_width, p_height, p_slot_count);
+	// TEMP DEBUG (black-screen investigation): log every main-ring recreate with
+	// outstanding lease state so mid-run destroy sources can be identified.
+	{
+		std::lock_guard<std::mutex> debug_lock(sink_mutex);
+		uint32_t busy = 0;
+		for (uint32_t i = 0; i < MAX_SLOTS; i++) {
+			if (!slot_free[i].load()) busy++;
+		}
+		diagnostic_print(String("[dsh-debug] main create_frames ") + uitos(p_width) + "x" + uitos(p_height)
+				+ " slots=" + uitos(p_slot_count) + " pending=" + uitos(pending_presents.size())
+				+ " busy_slots=" + uitos(busy) + " had_pool=" + (DSHSharedFramesWin32::has_frames(frames_pool) ? "yes" : "no"));
+	}
+
+	Error err = frames_factory.create_frames(frames_pool, p_width, p_height, p_slot_count);
 	ERR_FAIL_COND_V_MSG(err != OK, err, "DSH viewport: couldn't create the D3D11 shared frame pool.");
 
 	std::lock_guard<std::mutex> lock(sink_mutex);
-	const uint32_t slot_count = frames.get_slot_count();
+	const uint32_t slot_count = DSHSharedFramesWin32::get_slot_count(frames_pool);
 	for (uint32_t i = 0; i < MAX_SLOTS; i++) {
 		slot_free[i].store(i < slot_count);
 	}
@@ -1119,23 +1550,23 @@ void DSHViewportWorker::destroy_frames() {
 		}
 		sink_cv.notify_all();
 	}
-	frames.destroy_frames();
+	frames_factory.destroy_frames(frames_pool);
 }
 
 bool DSHViewportWorker::has_frames() const {
-	return frames.has_frames();
+	return DSHSharedFramesWin32::has_frames(frames_pool);
 }
 
 uint32_t DSHViewportWorker::get_slot_count() const {
-	return frames.get_slot_count();
+	return DSHSharedFramesWin32::get_slot_count(frames_pool);
 }
 
 VkImage DSHViewportWorker::get_slot_image(uint32_t p_slot) const {
-	return frames.get_slot_image(p_slot);
+	return DSHSharedFramesWin32::get_slot_image(frames_pool, p_slot);
 }
 
 uint64_t DSHViewportWorker::get_slot_nt_handle(uint32_t p_slot) const {
-	return frames.get_slot_nt_handle(p_slot);
+	return DSHSharedFramesWin32::get_slot_nt_handle(frames_pool, p_slot);
 }
 
 uint64_t DSHViewportWorker::allocate_present(uint32_t p_slot) {
@@ -1160,7 +1591,7 @@ uint32_t DSHViewportWorker::acquire_slot_blocking() {
 	const uint64_t deadline = steady_usec() + SLOT_LEASE_TIMEOUT_NS / 1000;
 	std::unique_lock<std::mutex> lock(sink_mutex);
 	for (;;) {
-		const uint32_t slot_count = frames.get_slot_count();
+		const uint32_t slot_count = DSHSharedFramesWin32::get_slot_count(frames_pool);
 		for (uint32_t i = 0; i < slot_count && i < MAX_SLOTS; i++) {
 			if (slot_free[i].load()) {
 				slot_free[i].store(false);
@@ -1188,14 +1619,14 @@ void DSHViewportWorker::mark_slot_released(uint32_t p_slot, uint64_t p_frame_id)
 }
 
 bool DSHViewportWorker::are_all_slots_free() const {
-	if (!frames.has_frames()) {
+	if (!DSHSharedFramesWin32::has_frames(frames_pool)) {
 		return true;
 	}
 	std::lock_guard<std::mutex> lock(sink_mutex);
 	if (!pending_presents.empty()) {
 		return false;
 	}
-	const uint32_t slot_count = frames.get_slot_count();
+	const uint32_t slot_count = DSHSharedFramesWin32::get_slot_count(frames_pool);
 	for (uint32_t i = 0; i < slot_count && i < MAX_SLOTS; i++) {
 		if (!slot_free[i].load()) {
 			return false;

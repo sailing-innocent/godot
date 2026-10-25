@@ -4155,6 +4155,10 @@ Error RenderingDeviceDriverVulkan::_swap_chain_resize_dsh(CommandQueue *p_comman
 	uint32_t slot_count = CLAMP(p_desired_framebuffer_count, 2U, DSHViewportFrameSinkVulkan::MAX_SLOTS);
 	Error err = sink->create_frames(physical_device, vk_device, p_command_queue->queue_family, p_surface->width, p_surface->height, slot_count);
 	ERR_FAIL_COND_V_MSG(err != OK, err, "DSH viewport: couldn't create the shared frame pool.");
+	// The sink is authoritative for its ring size: sub-window sinks cap their
+	// rings below MAX_SLOTS (protocol v2.1 quota), so size every derived array
+	// from what was actually created.
+	slot_count = sink->get_slot_count();
 
 	p_swap_chain->format = VK_FORMAT_R8G8B8A8_UNORM;
 	p_swap_chain->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;

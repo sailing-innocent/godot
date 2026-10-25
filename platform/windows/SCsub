@@ -18,6 +18,7 @@ common_win = [
     "display_server_dsh.cpp",
     "dsh_viewport_worker.cpp",
     "dsh_shared_frames_win32.cpp",
+    "dsh_window_sink.cpp",
     "key_mapping_windows.cpp",
     "windows_terminal_logger.cpp",
     "windows_utils.cpp",

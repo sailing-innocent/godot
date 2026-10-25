@@ -2030,7 +2030,14 @@ GameViewPlugin::GameViewPlugin() {
 #ifndef ANDROID_ENABLED
 	Ref<GameViewDebugger> game_view_debugger;
 	game_view_debugger.instantiate();
-	EmbeddedProcess *embedded_process = memnew(EmbeddedProcess);
+	EmbeddedProcessBase *embedded_process;
+	if (DisplayServer::get_singleton()->get_name() == "dsh") {
+		// Protocol v2.1: the DSH headless editor has no OS HWND to reparent; the
+		// game runs as a second broker session and presents into an overlay.
+		embedded_process = memnew(EmbeddedProcessDSH);
+	} else {
+		embedded_process = memnew(EmbeddedProcess);
+	}
 	setup(game_view_debugger, embedded_process);
 #else
 	setup_android();

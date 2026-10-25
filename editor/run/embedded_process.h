@@ -130,3 +130,46 @@ public:
 	EmbeddedProcess();
 	~EmbeddedProcess() override;
 };
+
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+// DSH (protocol v2.1) game embedding backend: instead of reparenting an OS
+// HWND (impossible in a headless worker), the game runs as a second broker
+// session spawned by the client on the editor worker's request
+// (godot.editor.v1/spawnGame), and its frames present into an overlay layer
+// positioned at the GameView rect. Every GameView UI behavior (embed switch,
+// status label, checkerboard, size follow) is unchanged because this class
+// implements the same EmbeddedProcessBase contract.
+class EmbeddedProcessDSH : public EmbeddedProcessBase {
+	GDCLASS(EmbeddedProcessDSH, EmbeddedProcessBase);
+	static EmbeddedProcessDSH *singleton;
+
+	bool embedding_completed = false;
+	ProcessID current_process_id = 0;
+	Rect2i last_rect;
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	static EmbeddedProcessDSH *get_singleton() { return singleton; }
+
+	Vector<String> pending_args; // Handed over by EditorRun::run before embedding.
+
+	EmbeddedProcessDSH();
+	~EmbeddedProcessDSH() override;
+
+	void embed_process(ProcessID p_pid) override;
+	bool is_embedding_completed() const override { return embedding_completed; }
+	bool is_embedding_in_progress() const override { return false; }
+	bool is_process_focused() const override { return embedding_completed; }
+	int get_embedded_pid() const override { return (int)current_process_id; }
+	void reset() override;
+	void reset_timers() override {}
+	void request_close() override;
+	void queue_update_embedded_process() override;
+	Rect2i get_adjusted_embedded_window_rect(const Rect2i &p_rect) const override { return p_rect; }
+
+	// Worker -> editor lifecycle report (godot.editor.v1/gameLifecycle).
+	void notify_game_running(bool p_running, int p_code);
+};
+#endif // WINDOWS_ENABLED && DSH_VIEWPORT_ENABLED

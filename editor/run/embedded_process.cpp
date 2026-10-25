@@ -462,3 +462,86 @@ EmbeddedProcess::~EmbeddedProcess() {
 		reset();
 	}
 }
+
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+
+#include "platform/windows/display_server_dsh.h"
+#include "platform/windows/dsh_viewport_worker.h"
+
+EmbeddedProcessDSH *EmbeddedProcessDSH::singleton = nullptr;
+
+EmbeddedProcessDSH::EmbeddedProcessDSH() {
+	singleton = this;
+}
+
+EmbeddedProcessDSH::~EmbeddedProcessDSH() {
+	if (singleton == this) {
+		singleton = nullptr;
+	}
+	DisplayServer *ds = DisplayServer::get_singleton();
+	if (ds && ds->get_name() == "dsh") {
+		static_cast<DisplayServerDSH *>(ds)->get_worker()->set_game_lifecycle_listener(Callable());
+	}
+}
+
+void EmbeddedProcessDSH::embed_process(ProcessID p_pid) {
+	DisplayServer *ds = DisplayServer::get_singleton();
+	if (ds == nullptr || ds->get_name() != "dsh") {
+		emit_signal(SNAME("embedding_failed"));
+		return;
+	}
+	DSHViewportWorker *worker = static_cast<DisplayServerDSH *>(ds)->get_worker();
+	worker->set_game_lifecycle_listener(callable_mp(this, &EmbeddedProcessDSH::notify_game_running));
+	current_process_id = p_pid;
+	last_rect = get_screen_embedded_window_rect();
+	worker->editor_spawn_game(pending_args, last_rect);
+	pending_args.clear();
+	// embedding_completed arrives with the client's gameLifecycle{running:true}.
+}
+
+void EmbeddedProcessDSH::notify_game_running(bool p_running, int p_code) {
+	if (p_running) {
+		if (!embedding_completed) {
+			embedding_completed = true;
+			queue_redraw();
+			emit_signal(SNAME("embedding_completed"));
+		}
+		return;
+	}
+	if (embedding_completed) {
+		embedding_completed = false;
+		queue_redraw();
+		// code != 0 marks a failed spawn; a clean stop just clears the state.
+		if (p_code != 0) {
+			emit_signal(SNAME("embedding_failed"));
+		}
+	}
+	current_process_id = 0;
+}
+
+void EmbeddedProcessDSH::reset() {
+	embedding_completed = false;
+	current_process_id = 0;
+	queue_redraw();
+}
+
+void EmbeddedProcessDSH::request_close() {
+	DisplayServer *ds = DisplayServer::get_singleton();
+	if (ds && ds->get_name() == "dsh") {
+		static_cast<DisplayServerDSH *>(ds)->get_worker()->editor_close_game();
+	}
+}
+
+void EmbeddedProcessDSH::queue_update_embedded_process() {
+	const Rect2i rect = get_screen_embedded_window_rect();
+	if (rect == last_rect) {
+		return;
+	}
+	last_rect = rect;
+	DisplayServer *ds = DisplayServer::get_singleton();
+	if (ds && ds->get_name() == "dsh") {
+		static_cast<DisplayServerDSH *>(ds)->get_worker()->editor_set_game_rect(rect);
+	}
+}
+
+#endif // WINDOWS_ENABLED && DSH_VIEWPORT_ENABLED

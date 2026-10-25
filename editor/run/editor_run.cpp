@@ -40,6 +40,14 @@
 #include "main/main.h"
 #include "servers/display/display_server.h"
 
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+#include "editor/run/embedded_process.h"
+// Sentinel "pid" for the DSH game session: non-zero (GameView requires it) but
+// guaranteed unkillable, because the DSH stop path closes the session through
+// the protocol instead of OS::kill.
+#define DSH_GAME_SENTINEL_PID ((ProcessID)0x7FFFFFFE)
+#endif
+
 EditorRun::Status EditorRun::get_status() const {
 	return status;
 }
@@ -186,7 +194,23 @@ Error EditorRun::run(const String &p_scene, const String &p_write_movie, const V
 			}
 			print_line(String(" ").join(output));
 		}
-
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+		if (DisplayServer::get_singleton()->get_name() == "dsh") {
+			// The game process is spawned by the client as a second broker session
+			// (godot.editor.v1/spawnGame); EditorRun only forwards the command
+			// line to the embed backend. Single instance in v1.
+			if (i == 0) {
+				ERR_FAIL_NULL_V(EmbeddedProcessDSH::get_singleton(), ERR_UNAVAILABLE);
+				Vector<String> forward;
+				for (const String &E : instance_args) {
+					forward.push_back(E);
+				}
+				EmbeddedProcessDSH::get_singleton()->pending_args = forward;
+				pids.push_back(DSH_GAME_SENTINEL_PID);
+			}
+			continue;
+		}
+#endif
 		ProcessID pid = 0;
 		Error err = OS::get_singleton()->create_instance(instance_args, &pid);
 		ERR_FAIL_COND_V(err, err);
@@ -230,6 +254,20 @@ void EditorRun::stop_child_process(ProcessID p_pid) {
 
 void EditorRun::stop() {
 	if (status != STATUS_STOP && pids.size() > 0) {
+#if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
+		if (DisplayServer::get_singleton()->get_name() == "dsh") {
+			// Ask the client to dispose the game session (gameClose); killing the
+			// sentinel pid would be meaningless and killing by pid is impossible
+			// for a process the broker spawned.
+			if (EmbeddedProcessDSH::get_singleton()) {
+				EmbeddedProcessDSH::get_singleton()->request_close();
+			}
+			pids.clear();
+			status = STATUS_STOP;
+			running_scene = "";
+			return;
+		}
+#endif
 		for (const ProcessID &E : pids) {
 			OS::get_singleton()->kill(E);
 		}

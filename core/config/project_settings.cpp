@@ -1783,7 +1783,14 @@ ProjectSettings::ProjectSettings() {
 
 	// Keep the enum values in sync with the `DisplayServerEnums::ScreenOrientation` enum.
 	custom_prop_info["display/window/handheld/orientation"] = PropertyInfo(Variant::INT, "display/window/handheld/orientation", PROPERTY_HINT_ENUM, "Landscape,Portrait,Reverse Landscape,Reverse Portrait,Sensor Landscape,Sensor Portrait,Sensor");
+#if defined(DSH_VIEWPORT_ENABLED)
+	// The DSH headless display server implements real sub-windows (protocol
+	// v2.1 multi-window); embedding would hide every popup/dialog from the
+	// client-side layer compositor. Projects may still opt back into embedding.
+	GLOBAL_DEF("display/window/subwindows/embed_subwindows", false);
+#else
 	GLOBAL_DEF("display/window/subwindows/embed_subwindows", true);
+#endif
 	// Keep the enum values in sync with the `DisplayServerEnums::VSyncMode` enum.
 	custom_prop_info["display/window/vsync/vsync_mode"] = PropertyInfo(Variant::INT, "display/window/vsync/vsync_mode", PROPERTY_HINT_ENUM, "Disabled,Enabled,Adaptive,Mailbox");
 

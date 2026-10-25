@@ -32,6 +32,7 @@
 
 #if defined(WINDOWS_ENABLED) && defined(DSH_VIEWPORT_ENABLED)
 
+#include "core/math/rect2i.h"
 #include "core/math/vector3.h"
 #include "core/os/mutex.h"
 #include "core/string/ustring.h"
@@ -39,6 +40,7 @@
 #include "core/variant/dictionary.h"
 #include "drivers/vulkan/dsh_viewport_frame_sink_vulkan.h"
 #include "scene/main/node.h"
+#include "servers/display/display_server_enums.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -48,6 +50,7 @@
 #include <thread>
 
 #include "dsh_shared_frames_win32.h"
+#include "dsh_window_sink.h"
 
 class DisplayServerDSH;
 class SceneTree;
@@ -90,16 +93,43 @@ public:
 // redirects swapchain presentation to D3D11 shared textures. All protocol
 // prints go to stdout (raw writes; the engine's own stdout printing is
 // disabled by the worker mode), diagnostics go to stderr.
+//
+// Protocol v2.1 (multi-window): the worker additionally owns a registry of
+// per-sub-window sinks (window ids 1..15, main window stays 0 on this sink),
+// emits window lifecycle/geometry events on the godot.window.v1 namespace and
+// routes window-tagged input/resize/focus controls back to the right engine
+// window. Window geometry is engine-driven: the client follows rect events.
 class DSHViewportWorker : public DSHViewportFrameSinkVulkan {
 public:
 	static constexpr uint32_t MAX_VIEWPORT_DIMENSION = 2048;
 	static constexpr uint32_t MAX_CSS_DIMENSION = 16384;
+	static constexpr uint32_t MAX_WINDOWS = 16; // Protocol window ids 0..15.
+	static constexpr uint32_t SUB_WINDOW_SLOTS = 2; // Per sub-window ring size (protocol v2.1).
 	static constexpr uint64_t SLOT_LEASE_TIMEOUT_NS = 10ULL * 1000 * 1000 * 1000; // Mirrors the graphics101 lease watchdog.
 	static const char *EXTENSION_NAMESPACE;
 	static const char *VIEWPORT_NAMESPACE; // godot.viewport.v1: relative mouse mode and drag behavior.
+	static const char *WINDOW_NAMESPACE; // godot.window.v1: window lifecycle/geometry (protocol v2.1).
+	static const char *EDITOR_NAMESPACE; // godot.editor.v1: game spawn requests (protocol v2.1).
 
 	static DSHViewportWorker *get_singleton() { return singleton; }
 	static bool static_stop_check(); // Registered as DSHViewportMode::worker_stop_check.
+
+	// Per sub-window state (main thread only). The sink renders the window's
+	// swapchain through the same DSH path as the main surface; metadata feeds
+	// the godot.window.v1 lifecycle events.
+	struct SubWindowState {
+		DSHWindowSink *sink = nullptr;
+		Rect2i rect;
+		String title;
+		uint32_t flags = 0;
+		bool visible = false;
+		bool focused = false;
+		int z = 0;
+		DisplayServerEnums::WindowID transient_parent = DisplayServerEnums::INVALID_WINDOW_ID;
+		bool has_pending_resize = false;
+		uint32_t pending_resize_width = 0;
+		uint32_t pending_resize_height = 0;
+	};
 
 private:
 	static DSHViewportWorker *singleton;
@@ -135,7 +165,9 @@ private:
 	// viewport-local CSS px; the engine window works in physical px. The factors
 	// are locked exactly when a resize is applied (same point as the epoch), so
 	// geometry can never be half-old/half-new. Without cssWidth/cssHeight the
-	// legacy single `scale` factor applies to both axes.
+	// legacy single `scale` factor applies to both axes. Protocol v2.1 reuses
+	// the session-level factors for every window (sub-window sizes and
+	// positions are engine-driven, so only the session DPR is needed).
 	double map_scale_x = 1.0;
 	double map_scale_y = 1.0;
 	double pending_scale = 1.0;
@@ -144,10 +176,22 @@ private:
 	bool has_pending_css = false;
 	Vector2 last_engine_pointer; // Last mapped pointer position, for motion relatives.
 
+	// ---- multi-window state (protocol v2.1, main thread) ----
+	HashMap<uint32_t, SubWindowState> sub_windows;
+	// Pump-thread snapshot of the active sub-window sinks; guarded by sinks_mutex
+	// (the registry itself is main-thread only).
+	std::mutex sinks_mutex;
+	LocalVector<std::pair<uint32_t, DSHWindowSink *>> active_sinks;
+	uint32_t focused_window = 0; // Engine window that currently holds keyboard focus (UINT32_MAX = none).
+	ObjectID last_demo_popup; // Test hook: last popup opened through godot.demo.v1/openPopup.
+	Callable game_lifecycle_listener; // EmbeddedProcessDSH, set while a game session runs (editor stage).
+	bool debug_game_echo = false; // Verify hook: gameLifecycle controls echo back as gameDebug while no real game session runs (scripts/godot.mjs gameTab).
+
 	uint64_t stats_last_usec = 0;
 
-	// ---- frame sink state (mixed threads) ----
-	DSHSharedFramesWin32 frames;
+	// ---- frame sink state (mixed threads, main window) ----
+	DSHSharedFramesWin32 frames_factory;
+	DSHSharedFramesWin32::Pool frames_pool;
 	bool frames_pool_ready = false;
 	VkDevice vk_device = VK_NULL_HANDLE;
 	VkSemaphore completion_semaphore = VK_NULL_HANDLE;
@@ -174,23 +218,30 @@ private:
 	void _handle_input_event(const Dictionary &p_event);
 	void _handle_extension(const String &p_name, const Dictionary &p_payload);
 	void _handle_viewport_extension(const String &p_name, const Dictionary &p_payload);
-	void _inject_key(const Dictionary &p_event);
-	void _inject_drop(const Dictionary &p_event);
-	void _inject_pointer(const Dictionary &p_event);
-	void _inject_wheel(const Dictionary &p_event);
-	void _inject_text(const Dictionary &p_event);
-	void _inject_ime(const Dictionary &p_event);
+	void _handle_editor_extension(const String &p_name, const Dictionary &p_payload);
+	void _debug_game_lifecycle(bool p_running, int64_t p_code); // Verify hook: echoes gameLifecycle back as a godot.editor.v1/gameDebug event.
+	void _inject_key(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
+	void _inject_drop(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
+	void _inject_pointer(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
+	void _inject_wheel(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
+	void _inject_text(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
+	void _inject_ime(const Dictionary &p_event, DisplayServerEnums::WindowID p_window);
 	void _apply_pending_resize();
+	void _apply_sub_window_resize(uint32_t p_window);
 	void _emit_frame(uint32_t p_slot);
+	void _emit_window_frame(uint32_t p_window, DSHWindowSink *p_sink, uint32_t p_slot);
+	uint32_t _event_window(const Dictionary &p_event) const;
 	Vector2 _map_css_to_engine(double p_x, double p_y) const;
 	void _release_all_input_state();
 	void _apply_focus(bool p_focused);
 	void _emit_extension_event(const String &p_name, const Dictionary &p_payload);
+	void _emit_extension_event_ns(const String &p_ns, const String &p_name, const Dictionary &p_payload);
+	void _open_demo_popup(const Dictionary &p_payload);
 
 	static String _modifiers_to_string(uint32_t p_modifiers);
 
 public:
-	// DSHViewportFrameSinkVulkan implementation.
+	// DSHViewportFrameSinkVulkan implementation (main window sink).
 	virtual Error create_frames(VkPhysicalDevice p_physical_device, VkDevice p_device, uint32_t p_graphics_queue_family, uint32_t p_width, uint32_t p_height, uint32_t p_slot_count) override;
 	virtual void destroy_frames() override;
 	virtual bool has_frames() const override;
@@ -207,6 +258,8 @@ public:
 
 	Error initialize(uint32_t p_broker_pid); // Stores the broker PID; the D3D11 side initializes on the first create_frames() once the VkDevice exists.
 	void emit_viewport_extension(const String &p_name, const Dictionary &p_payload); // Worker -> client event on the godot.viewport.v1 namespace (e.g. imeState).
+	void emit_window_event(const String &p_name, const Dictionary &p_payload); // Worker -> client event on the godot.window.v1 namespace (protocol v2.1).
+	void emit_editor_event(const String &p_name, const Dictionary &p_payload); // Worker -> client event on the godot.editor.v1 namespace (protocol v2.1).
 	void set_display_server(DisplayServerDSH *p_display_server) { display_server = p_display_server; }
 	void start(); // Spawns stdin/pump threads; called once the DisplayServer is fully created.
 	void announce(); // Emits the protocol hello (first stdout line); requires the RenderingDevice.
@@ -214,6 +267,27 @@ public:
 	bool has_fatal_error() const { return fatal_error.load(); }
 	bool has_applied_surface() const { return current_epoch.load() >= 1; } // A broker resize has been applied.
 	bool is_viewport_visible() const { return viewport_visible.load(); } // Broker visibility (hidden suspends production).
+
+	// ---- multi-window API used by DisplayServerDSH (protocol v2.1) ----
+	DSHWindowSink *dsh_create_window_sink(uint32_t p_window); // Registers a sub-window sink (ids 1..MAX_WINDOWS-1).
+	void dsh_destroy_window_sink(uint32_t p_window);
+	bool dsh_has_window(uint32_t p_window) const { return p_window == 0 || sub_windows.has(p_window); }
+	SubWindowState *dsh_get_sub_window(uint32_t p_window) { return sub_windows.getptr(p_window); }
+	const SubWindowState *dsh_get_sub_window(uint32_t p_window) const { return sub_windows.getptr(p_window); }
+	void dsh_set_focused_window(uint32_t p_window); // Client/engine focus routing; fires FOCUS_IN/OUT + alignment event.
+	uint32_t dsh_get_focused_window() const { return focused_window; }
+	void dsh_notify_engine_focus(uint32_t p_window, bool p_focused); // Engine-internal focus change -> client alignment event.
+
+	// ---- game spawn channel (protocol v2.1, editor stage) ----
+	void set_game_lifecycle_listener(const Callable &p_listener) {
+		game_lifecycle_listener = p_listener;
+		if (p_listener.is_valid()) {
+			debug_game_echo = false; // A real game session owns the lifecycle slot.
+		}
+	}
+	void editor_spawn_game(const Vector<String> &p_args, const Rect2i &p_rect); // -> godot.editor.v1/spawnGame.
+	void editor_set_game_rect(const Rect2i &p_rect); // -> godot.editor.v1/gameRect (GameView size follow).
+	void editor_close_game(); // -> godot.editor.v1/gameClose (user pressed Stop).
 
 	// Called by DisplayServerDSH::process_events() on the main thread.
 	void poll();
